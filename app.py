@@ -10069,7 +10069,7 @@ def chat_v3():
                 "query": query,
                 "orgId": org_id,
                 "conversationHistory": conversation_history,
-                "answer": f"I found {len(search_results)} relevant results, but couldn't generate a complete answer. Please check the search results below.",
+                "answer": "Please try again later. I am facing technical issues at the moment. If this persists, please contact support",
                 "sources": context_result["sources"],
                 "search_results": search_results,
                 "context_metadata": {
@@ -10246,3 +10246,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ Server error: {e}")
             stop_keep_alive_service()
+
