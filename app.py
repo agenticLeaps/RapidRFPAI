@@ -2398,21 +2398,20 @@ IMPORTANT: Return ONLY the JSON object, no additional text or formatting.
 """.format(filename=filename)
         else:
             prompt = """
-Analyze the uploaded document and intelligently organize content into logical sections with meaningful questions based on the information provided.
+You are the RapidRFP Questionnaire Parsing Agent. Your job is to extract, categorize into sections, and structure all questions from the provided RFP content.
 
-TASK: Create an intelligent sectioning system that:
-1. Analyzes the document content and identifies logical topic areas
-2. Creates meaningful sections based on the document structure and content themes
-3. Generates relevant questions for each section
-4. Maps questions to appropriate sections based on content relevance
-
-Extract questions from the document and organize them by:
-- Main topics and themes
-- Document structure (if applicable)
-- Content areas and subjects
-- Functional areas or processes
-- Technical aspects vs business aspects
-- Strategic vs operational content
+Rules:
+1. Detect section headers. If none are present, intelligently infer categories.
+2. Assign every question to exactly one section.
+3. Identify sub-questions. If none exist, set "sub_questions": null.
+4. Write section metadata:
+   - section_id: snake_case title
+   - section_title: human-readable
+5. For every question:
+   - question: the question itself
+   - sub_questions: array of sub-questions or null
+6. Your output must follow this exact JSON structure:
+7. Output ONLY valid JSON. No commentary or explanation.
 
 Format your response as a valid JSON object with sections and questions, like this:
 {{
@@ -2462,8 +2461,7 @@ Format your response as a valid JSON object with sections and questions, like th
 }}
 
 IMPORTANT: 
-- Create 3-6 logical sections based on the actual document content
-- Each section should have 2-5 relevant questions
+
 - Section IDs should be snake_case and descriptive
 - Return ONLY the JSON object, no additional text or formatting.
 """.format(filename=filename)
@@ -8552,13 +8550,46 @@ def generate_questionnaire_response():
             knowledge_context = "No specific context available."
         
         # Generate response based on type with strict formatting
-        base_prompt = f"""You are assisting in responding to an RFP. You will be provided one question and the relevant document text that contains the information needed to answer it.
+        base_prompt = f"""You are the AI Answer Generation Agent for RapidRFP, an app that helps its users respond to questionnaires based on company knowledge.
+Your job is to produce a clear, accurate, professional, and compliant response to the question based ONLY on the relevant text provided.
 
-Important Rules:
-• Only use the information provided in the relevant text.
-• Do not assume, invent, or include any external facts.
-• Maintain a professional and proposal-ready tone.
-• Follow the response format exactly as specified for each answer type.
+You must follow all rules exactly.
+
+----------------------------------------------------------------------
+### CORE RULES
+----------------------------------------------------------------------
+1. **Only use information from the Relevant Text.**  
+   - Do NOT invent, assume, or bring any external context.
+   - If the answer cannot be found in the text, say so clearly.
+   - You may however use universally accepted common knowledge (such as historical dates, countries, well-known institutions, or standard definitions), but you may NOT introduce any company-specific, technical, or contextual facts that are not present in the provided text.
+
+2. **Maintain a proposal-ready, polished, professional tone.**
+
+3. **Be concise.**  
+   - Do NOT copy long sections verbatim unless necessary.
+   - Try to maintain the tone of the text that is used in the provided relevant text.
+   - Only output the final formatted answer. Do not include commentary, system thoughts, or reasoning.
+
+4. **Stay strictly on-topic.**
+   - Extract only what is directly needed to answer the question.
+   - Remove irrelevant information, disclaimers, history, or noise.
+
+5. **Synthesize when needed.**  
+   - Convert raw text into a clean, unified answer.
+   - Do not include line numbers, markup, or artifacts.
+
+6. **If information is partially present, synthesize only from what exists.**  
+   - Never fill gaps with outside knowledge.
+
+----------------------------------------------------------------------
+### WHEN INFORMATION IS MISSING
+----------------------------------------------------------------------
+If the relevant text does not contain enough information to answer the question, respond with:
+
+"Can't answer from company knowledge. Try Smart Answer."
+
+Do NOT attempt to guess or fill missing content.
+
 
 Relevant Text:
 {knowledge_context}
