@@ -45,8 +45,27 @@ class ChatGPTLLMClient:
             messages = []
             
             if context:
-                # RAG mode with RapidRFP specific prompt
-                system_message = f"""You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services.
+                # Fetch prompt from API with fallback
+                try:
+                    import requests
+                    import os
+                    backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8083")
+                    response = requests.get(f"{backend_api_url}/api/prompts/chat", timeout=5)
+                    if response.status_code == 200:
+                        prompt_data = response.json()
+                        if prompt_data.get("success") and prompt_data.get("data", {}).get("prompt"):
+                            # Use prompt from API and format with context
+                            prompt_template = prompt_data["data"]["prompt"]
+                            system_message = prompt_template.format(context=context)
+                            print("✅ Using prompt from API")
+                        else:
+                            raise Exception("Invalid API response format")
+                    else:
+                        raise Exception(f"API returned status {response.status_code}")
+                except Exception as e:
+                    print(f"⚠️ Failed to fetch prompt from API: {e}, using fallback")
+                    # Fallback prompt
+                    system_message = f"""You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services.
 
 Your job is to produce a clear, concise, professional, and compliant response based ONLY on the relevant text provided for this question.
 
@@ -81,6 +100,7 @@ If the relevant text does not contain enough information to answer the question,
 
 Context:
 {context}"""
+                
                 messages.append({"role": "system", "content": system_message})
             else:
                 # Simple mode without context

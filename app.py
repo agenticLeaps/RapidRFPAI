@@ -2402,8 +2402,25 @@ Format your response as a valid JSON object with sections and questions, like th
 IMPORTANT: Return ONLY the JSON object, no additional text or formatting.
 """.format(filename=filename)
         else:
-            prompt = """
-You are the RapidRFP Questionnaire Parsing Agent. Your job is to extract, categorize into sections, and structure all questions from the provided RFP content.
+            # Fetch prompt from API with fallback
+            try:
+                import requests
+                backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8083")
+                response = requests.get(f"{backend_api_url}/api/prompts/extractQuestions", timeout=5)
+                if response.status_code == 200:
+                    prompt_data = response.json()
+                    if prompt_data.get("success") and prompt_data.get("data", {}).get("prompt"):
+                        # Use prompt from API
+                        api_prompt = prompt_data["data"]["prompt"]
+                        print("✅ Using extractQuestions prompt from API")
+                    else:
+                        raise Exception("Invalid API response format")
+                else:
+                    raise Exception(f"API returned status {response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Failed to fetch extractQuestions prompt from API: {e}, using fallback")
+                # Fallback prompt
+                api_prompt = """You are the RapidRFP Questionnaire Parsing Agent. Your job is to extract, categorize into sections, and structure all questions from the provided RFP content.
 
 Rules:
 1. Detect section headers. If none are present, intelligently infer categories.
@@ -2418,12 +2435,20 @@ Rules:
 6. Your output must follow this exact JSON structure:
 7. Output ONLY valid JSON. No commentary or explanation.
 
+
+IMPORTANT: 
+
+- Section IDs should be snake_case and descriptive
+- Return ONLY the JSON object, no additional text or formatting."""
+
+            # Hardcoded JSON format structure
+            json_format = """
 Format your response as a valid JSON object with sections and questions, like this:
 {{
   "sections": [
     {{
       "section_id": "overview_purpose",
-      "section_title": "Overview & Purpose",
+      "section_title": "Overview & Purpose", 
       "section_description": "Questions about the main objectives, goals, and overall scope",
       "questions": [
         {{
@@ -2439,7 +2464,7 @@ Format your response as a valid JSON object with sections and questions, like th
     {{
       "section_id": "processes_workflow",
       "section_title": "Processes & Workflow",
-      "section_description": "Questions about how things work and operational procedures",
+      "section_description": "Questions about how things work and operational procedures", 
       "questions": [
         {{
           "question": "How does the process work?",
@@ -2463,13 +2488,10 @@ Format your response as a valid JSON object with sections and questions, like th
       ]
     }}
   ]
-}}
+}}"""
 
-IMPORTANT: 
-
-- Section IDs should be snake_case and descriptive
-- Return ONLY the JSON object, no additional text or formatting.
-""".format(filename=filename)
+            # Combine API prompt + hardcoded JSON format
+            prompt = f"{api_prompt}\n{json_format}"
 
         model = GenerativeModel("gemini-2.0-flash")
         
@@ -8593,8 +8615,29 @@ def generate_questionnaire_response():
             print(f"❌ Error retrieving from NeonDB: {str(e)}")
             knowledge_context = "No specific context available."
         
-        # Generate response using single base prompt
-        base_prompt = f"""You are assisting in responding to an RFP questionnaire. You will be provided one question and the relevant document text that contains the information needed to answer it.
+        # Fetch base prompt from API with fallback
+        try:
+            import requests
+            backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8083")
+            response = requests.get(f"{backend_api_url}/api/prompts/generateResponse", timeout=5)
+            if response.status_code == 200:
+                prompt_data = response.json()
+                if prompt_data.get("success") and prompt_data.get("data", {}).get("prompt"):
+                    # Use prompt from API and format with variables
+                    prompt_template = prompt_data["data"]["prompt"]
+                    base_prompt = prompt_template.format(
+                        knowledge_context=knowledge_context,
+                        question_text=question_text
+                    )
+                    print("✅ Using generateResponse prompt from API")
+                else:
+                    raise Exception("Invalid API response format")
+            else:
+                raise Exception(f"API returned status {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch generateResponse prompt from API: {e}, using fallback")
+            # Fallback prompt
+            base_prompt = f"""You are assisting in responding to an RFP questionnaire. You will be provided one question and the relevant document text that contains the information needed to answer it.
 
 Important Rules:
 • Only use the information provided in the relevant text.
