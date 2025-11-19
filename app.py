@@ -2621,10 +2621,24 @@ IMPORTANT:
                             questions_list = section.get("questions", [])
                             
                             for q in questions_list:
-                                if isinstance(q, dict) and "question" in q and "description" in q:
+                                if isinstance(q, dict) and "question" in q:
+                                    # Handle both old format (with "description") and new format (with "sub_questions")
+                                    description = ""
+                                    if "description" in q:
+                                        description = str(q["description"]).strip()
+                                    elif "sub_questions" in q:
+                                        # Use the question text as description or provide a default
+                                        sub_q = q.get("sub_questions")
+                                        if sub_q and isinstance(sub_q, list) and len(sub_q) > 0:
+                                            description = f"Related sub-questions: {', '.join(str(sq) for sq in sub_q[:2])}"
+                                        else:
+                                            description = "Question extracted from document"
+                                    else:
+                                        description = "Question extracted from document"
+                                    
                                     valid_questions.append({
                                         "question": str(q["question"]).strip(),
-                                        "description": str(q["description"]).strip()
+                                        "description": description
                                     })
                                     total_questions += 1
                             
@@ -2656,10 +2670,23 @@ IMPORTANT:
             elif isinstance(parsed_response, list):
                 valid_questions = []
                 for q in parsed_response:
-                    if isinstance(q, dict) and "question" in q and "description" in q:
+                    if isinstance(q, dict) and "question" in q:
+                        # Handle both old format (with "description") and new format (with "sub_questions")
+                        description = ""
+                        if "description" in q:
+                            description = str(q["description"]).strip()
+                        elif "sub_questions" in q:
+                            sub_q = q.get("sub_questions")
+                            if sub_q and isinstance(sub_q, list) and len(sub_q) > 0:
+                                description = f"Related sub-questions: {', '.join(str(sq) for sq in sub_q[:2])}"
+                            else:
+                                description = "Question extracted from document"
+                        else:
+                            description = "Question extracted from document"
+                        
                         valid_questions.append({
                             "question": str(q["question"]).strip(),
-                            "description": str(q["description"]).strip()
+                            "description": description
                         })
                 
                 if valid_questions:

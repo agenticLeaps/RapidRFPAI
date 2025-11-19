@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LLM integration for Qwen3 model
+LLM integration for ChatGPT (OpenAI) model
 """
 import os
 import requests
@@ -9,32 +9,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class Qwen3LLMClient:
+class ChatGPTLLMClient:
     def __init__(self):
-        self.endpoint_url = os.getenv("QWEN3_LLM_ENDPOINT")
-        if not self.endpoint_url:
-            raise ValueError("QWEN3_LLM_ENDPOINT not found in environment")
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment")
         
-        # Ensure endpoint URL is properly formatted
-        if not self.endpoint_url.startswith("http"):
-            self.endpoint_url = f"https://{self.endpoint_url}"
-        if not self.endpoint_url.endswith("/"):
-            self.endpoint_url += "/"
+        self.base_url = "https://api.openai.com/v1"
+        self.model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
     
     def generate_answer(
         self, 
         query: str, 
         context: str = "", 
-        max_length: int = 1024,
+        max_tokens: int = 1024,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
         """
-        Generate answer using Qwen3 LLM with optional context (RAG)
+        Generate answer using ChatGPT with optional context (RAG)
         
         Args:
             query: User question
             context: Retrieved context from documents
-            max_length: Maximum response length
+            max_tokens: Maximum response tokens
             temperature: Sampling temperature
             
         Returns:
@@ -44,113 +41,74 @@ class Qwen3LLMClient:
         print(f"📝 Context length: {len(context)} chars")
         
         try:
-            # Try using Gradio Client first
-            try:
-                from gradio_client import Client
-                llm_space_name = os.getenv("LLM_SPACENAME")
-                
-                if llm_space_name:
-                    print(f"🔗 Using HF Space: {llm_space_name}")
-                    client = Client(llm_space_name)
-                    
-                    # Use exact format from your deployed app documentation
-                    if context:
-                        # RAG chat endpoint - Tab 2 (index 1)
-                        result = client.predict(
-                            query,          # query parameter
-                            context,        # context parameter
-                            max_length,     # max_length parameter
-                            temperature,    # temperature parameter
-                            fn_index=1      # RAG Chat tab function
-                        )
-                    else:
-                        # Simple generation endpoint - Tab 1 (index 0)  
-                        result = client.predict(
-                            query,          # prompt parameter
-                            max_length,     # max_length parameter
-                            temperature,    # temperature parameter
-                            0.9,            # top_p parameter
-                            fn_index=0      # Simple Chat tab function
-                        )
-                    
-                    # Clean up response - extract assistant's answer
-                    clean_answer = result
-                    
-                    # Handle tuple response from Gradio (extract the first string element)
-                    if isinstance(result, (tuple, list)):
-                        # Find the first string in the tuple/list
-                        for item in result:
-                            if isinstance(item, str):
-                                result = item
-                                break
-                        else:
-                            # If no string found, convert first element to string
-                            result = str(result[0]) if result else ""
-                    
-                    if isinstance(result, str):
-                        # Remove chat template artifacts
-                        if "assistant\n" in result:
-                            parts = result.split("assistant\n")
-                            if len(parts) > 1:
-                                clean_answer = parts[-1].strip()
-                        elif "assistant" in result:
-                            parts = result.split("assistant")
-                            if len(parts) > 1:
-                                clean_answer = parts[-1].strip()
-                        
-                        # Remove system prompts if present
-                        if "system\nYou are Qwen" in clean_answer:
-                            lines = clean_answer.split('\n')
-                            # Find where actual response starts
-                            for i, line in enumerate(lines):
-                                if isinstance(line, str) and line.strip() and not line.startswith("system") and not line.startswith("user") and not line.startswith("You are Qwen"):
-                                    clean_answer = '\n'.join(lines[i:]).strip()
-                                    break
-                    
-                    return {
-                        "success": True,
-                        "answer": clean_answer,
-                        "model": "Qwen2.5-3B-Instruct",
-                        "context_used": len(context) > 0,
-                        "context_length": len(context),
-                        "source": "hf_space_gradio"
-                    }
-                    
-            except Exception as e:
-                print(f"⚠️ Gradio client failed, falling back to HTTP: {str(e)}")
+            # Prepare messages for ChatGPT
+            messages = []
             
-            # Fallback to direct HTTP requests to the configured endpoint
-            if self.endpoint_url and "hf.space" not in self.endpoint_url:
-                # Use the configured endpoint (non-HF Space)
-                response = requests.post(
-                    f"{self.endpoint_url}chat",
-                    json={
-                        "query": query,
-                        "context": context,
-                        "max_length": max_length,
-                        "temperature": temperature
-                    },
-                    timeout=None,  # No timeout for LLM generation
-                    headers={"Content-Type": "application/json"},
-                    verify=False  # Skip SSL verification for potential SSL issues
-                )
+            if context:
+                # RAG mode with RapidRFP specific prompt
+                system_message = f"""You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services.
+
+Your job is to produce a clear, concise, professional, and compliant response based ONLY on the relevant text provided for this question.
+
+You must follow all rules exactly.
+
+⸻
+
+CORE RULES
+    •    Use only the provided relevant text as your source of truth.
+If the text contradicts general knowledge, the text wins.
+    •    Do NOT invent or assume any facts that are not present in the provided text or in the context provided by the user.
+    •    You may use universally accepted common knowledge
+(e.g., dates, countries, broad definitions like "cloud computing"),
+but you may NOT add any company-specific, technical, or contextual information not found in the text.
+    •    Never fill information gaps with outside knowledge.
+Only clarify using the text + universal common knowledge.
+    •    Keep responses concise, direct, and proposal-ready.
+    •    Remove any irrelevant information, disclaimers, noise, or markup.
+    •    Do not include line numbers, artifacts, or references to the text itself.
+    •    Do not restate or summarize the entire text—only extract what is required to answer the question.
+    •    If there are conflicting statements in the text, choose the strictest and safest interpretation.
+
+⸻
+
+WHEN INFORMATION IS MISSING
+
+If the relevant text does not contain enough information to answer the question, respond with:
+
+"I'm unable to answer this from the provided company knowledge. Please provide additional context or keywords so I can assist further."
+
+⸻
+
+Context:
+{context}"""
+                messages.append({"role": "system", "content": system_message})
             else:
-                # No fallback available for HF Spaces
-                print("❌ No HTTP fallback available for HF Spaces")
-                return {
-                    "success": False,
-                    "error": "LLM service unavailable",
-                    "answer": "I apologize, but I encountered an error processing your request. Please try again.",
-                    "model": "fallback",
-                    "context_used": len(context) > 0,
-                    "context_length": len(context)
-                }
+                # Simple mode without context
+                messages.append({"role": "system", "content": "You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services. Provide clear, concise, and professional responses."})
             
-            print(f"📊 LLM Response status: {response.status_code}")
+            messages.append({"role": "user", "content": query})
+            
+            # Call OpenAI API
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature
+                },
+                timeout=60
+            )
+            
+            print(f"📊 OpenAI API Response status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
-                answer = result.get("answer", "")
+                answer = result["choices"][0]["message"]["content"]
                 
                 print(f"✅ Generated answer: {len(answer)} chars")
                 print(f"📋 Answer preview: {answer[:150]}...")
@@ -161,16 +119,17 @@ class Qwen3LLMClient:
                     "query": query,
                     "context_used": len(context) > 0,
                     "context_length": len(context),
-                    "model": "Qwen3-7B-Instruct",
+                    "model": self.model,
                     "parameters": {
-                        "max_length": max_length,
+                        "max_tokens": max_tokens,
                         "temperature": temperature
-                    }
+                    },
+                    "usage": result.get("usage", {})
                 }
             else:
-                error_msg = f"LLM API error: {response.status_code}"
+                error_msg = f"OpenAI API error: {response.status_code}"
                 try:
-                    error_detail = response.json().get("error", response.text)
+                    error_detail = response.json().get("error", {}).get("message", response.text)
                     error_msg += f" - {error_detail}"
                 except:
                     error_msg += f" - {response.text}"
@@ -183,7 +142,7 @@ class Qwen3LLMClient:
                 }
                 
         except requests.exceptions.RequestException as e:
-            error_msg = f"LLM request failed: {str(e)}"
+            error_msg = f"OpenAI API request failed: {str(e)}"
             print(f"❌ {error_msg}")
             return {
                 "success": False,
@@ -191,7 +150,7 @@ class Qwen3LLMClient:
                 "query": query
             }
         except Exception as e:
-            error_msg = f"LLM generation error: {str(e)}"
+            error_msg = f"ChatGPT generation error: {str(e)}"
             print(f"❌ {error_msg}")
             return {
                 "success": False,
@@ -202,7 +161,7 @@ class Qwen3LLMClient:
     def simple_generate(
         self, 
         prompt: str, 
-        max_length: int = 512,
+        max_tokens: int = 512,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
         """
@@ -210,7 +169,7 @@ class Qwen3LLMClient:
         
         Args:
             prompt: Text prompt
-            max_length: Maximum response length
+            max_tokens: Maximum response tokens
             temperature: Sampling temperature
             
         Returns:
@@ -219,22 +178,31 @@ class Qwen3LLMClient:
         print(f"🔤 Simple generation for: '{prompt[:100]}...'")
         
         try:
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ]
+            
             response = requests.post(
-                f"{self.endpoint_url}generate",
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
                 json={
-                    "prompt": prompt,
-                    "max_length": max_length,
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
                     "temperature": temperature
                 },
-                timeout=None,
-                headers={"Content-Type": "application/json"}
+                timeout=60
             )
             
-            print(f"📊 LLM Response status: {response.status_code}")
+            print(f"📊 OpenAI API Response status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
-                response_text = result.get("response", "")
+                response_text = result["choices"][0]["message"]["content"]
                 
                 print(f"✅ Generated response: {len(response_text)} chars")
                 
@@ -242,11 +210,21 @@ class Qwen3LLMClient:
                     "success": True,
                     "response": response_text,
                     "prompt": prompt,
-                    "model": "Qwen3-7B-Instruct",
-                    "parameters": result.get("parameters", {})
+                    "model": self.model,
+                    "parameters": {
+                        "max_tokens": max_tokens,
+                        "temperature": temperature
+                    },
+                    "usage": result.get("usage", {})
                 }
             else:
-                error_msg = f"LLM API error: {response.status_code} - {response.text}"
+                error_msg = f"OpenAI API error: {response.status_code}"
+                try:
+                    error_detail = response.json().get("error", {}).get("message", response.text)
+                    error_msg += f" - {error_detail}"
+                except:
+                    error_msg += f" - {response.text}"
+                
                 print(f"❌ {error_msg}")
                 return {
                     "success": False,
@@ -255,7 +233,7 @@ class Qwen3LLMClient:
                 }
                 
         except Exception as e:
-            error_msg = f"LLM generation error: {str(e)}"
+            error_msg = f"ChatGPT generation error: {str(e)}"
             print(f"❌ {error_msg}")
             return {
                 "success": False,
@@ -264,35 +242,40 @@ class Qwen3LLMClient:
             }
     
     def health_check(self) -> Dict[str, Any]:
-        """Check if LLM endpoint is healthy"""
+        """Check if OpenAI API is accessible"""
         try:
-            response = requests.get(f"{self.endpoint_url}", timeout=10)
+            response = requests.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=10
+            )
             if response.status_code == 200:
                 return {
                     "healthy": True,
-                    "endpoint": self.endpoint_url,
-                    "status": response.json()
+                    "endpoint": self.base_url,
+                    "model": self.model,
+                    "status": "OpenAI API accessible"
                 }
             else:
                 return {
                     "healthy": False,
-                    "endpoint": self.endpoint_url,
+                    "endpoint": self.base_url,
                     "error": f"Status {response.status_code}"
                 }
         except Exception as e:
             return {
                 "healthy": False,
-                "endpoint": self.endpoint_url,
+                "endpoint": self.base_url,
                 "error": str(e)
             }
 
 # Convenience functions
 def generate_rag_answer(query: str, context: str = "", **kwargs) -> Dict[str, Any]:
-    """Generate RAG answer using Qwen3"""
-    client = Qwen3LLMClient()
+    """Generate RAG answer using ChatGPT"""
+    client = ChatGPTLLMClient()
     return client.generate_answer(query, context, **kwargs)
 
 def generate_simple_response(prompt: str, **kwargs) -> Dict[str, Any]:
-    """Generate simple response using Qwen3"""
-    client = Qwen3LLMClient()
+    """Generate simple response using ChatGPT"""
+    client = ChatGPTLLMClient()
     return client.simple_generate(prompt, **kwargs)

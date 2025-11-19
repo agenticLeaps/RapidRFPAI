@@ -25,13 +25,13 @@ def test_complete_rag_pipeline():
     # Test 2: Check LLM health
     print("\n2. 🤖 LLM Health Check")
     try:
-        from llm_integration import Qwen3LLMClient
-        client = Qwen3LLMClient()
+        from llm_integration import ChatGPTLLMClient
+        client = ChatGPTLLMClient()
         health = client.health_check()
         if health["healthy"]:
-            print("✅ Qwen3 LLM is healthy")
+            print("✅ ChatGPT API is healthy")
         else:
-            print(f"⚠️ Qwen3 LLM issue: {health.get('error', 'Unknown')}")
+            print(f"⚠️ ChatGPT API issue: {health.get('error', 'Unknown')}")
     except Exception as e:
         print(f"❌ LLM health check failed: {e}")
     
