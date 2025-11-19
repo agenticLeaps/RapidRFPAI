@@ -8436,7 +8436,7 @@ def generate_response_v2():
         llm_result = generate_rag_answer(
             query=query,
             context=enhanced_context,
-            max_length=800,
+            max_tokens=2048,
             temperature=0.7
         )
         
@@ -10039,7 +10039,7 @@ def chat_v3():
         llm_result = generate_rag_answer(
             query=query,
             context=enhanced_context,
-            max_length=1024,
+            max_tokens=2048,
             temperature=0.7
         )
         
