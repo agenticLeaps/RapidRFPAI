@@ -1759,7 +1759,8 @@ try:
         import json
         cred_dict = json.loads(cred_path)
         firebase_cred = credentials.Certificate(cred_dict)
-        print("✅ Using environment credentials for Firebase (may not have Firestore access)")
+        print("⚠️ Using environment credentials for Firebase (may not have Firestore access)")
+        print("⚠️ For full Firestore access, please provide fire.json credentials file")
     else:
         # Fallback to file path
         firebase_cred = credentials.Certificate(cred_path)
@@ -2261,7 +2262,11 @@ def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option=
         return context_text if context_text.strip() else "No specific context available."
         
     except Exception as e:
-        print(f"❌ Error getting knowledge base context: {str(e)}")
+        error_msg = str(e)
+        if "403" in error_msg and "permissions" in error_msg.lower():
+            print(f"❌ Error getting knowledge base context: 403 Missing or insufficient permissions. Check Firebase credentials (fire.json)")
+        else:
+            print(f"❌ Error getting knowledge base context: {error_msg}")
         return "No specific context available."
 
 def generate_answer_with_gcp(query, context_chunks, conversation_history=""):
@@ -8551,77 +8556,84 @@ def generate_questionnaire_response():
                 'error': 'Missing required fields'
             }), 400
         
-        if not VERTEX_AVAILABLE:
+        # Check if ChatGPT LLM integration is available
+        try:
+            from llm_integration import ChatGPTLLMClient
+            # Test if we can create a client (this will check for API key)
+            test_client = ChatGPTLLMClient()
+        except Exception as e:
             return jsonify({
                 'success': False,
-                'error': 'Vertex AI service not available'
+                'error': f'ChatGPT API not available: {str(e)}'
             }), 500
         
         start_time = time.time()
         
+        # Use NeonDB retrieval system like v3 chat
         try:
-            knowledge_context = get_knowledge_base_context(
+            from retrieval_system import search_documents
+            
+            print(f"🎯 Getting context from NeonDB for query: {question_text[:100]}...")
+            search_results = search_documents(
                 query=question_text,
                 org_id=org_id,
-                project_id=project_id,
-                knowledge_base_option=knowledge_base_option,
-                rerank=rerank,
-                enable_hybrid_search=enable_hybrid_search,
-                dense_weight=dense_weight,
-                sparse_weight=sparse_weight,
-                enable_query_expansion=enable_query_expansion,
-                max_query_variations=max_query_variations,
-                context_type=context_type
+                file_ids=None,  # Search all files
+                top_k=5  # Get top 5 results
             )
-        except:
+            
+            # Build context from search results
+            if search_results:
+                knowledge_context = "\n\n".join([result["text"][:500] for result in search_results[:3]])  # Use top 3 results, 500 chars each
+                print(f"✅ Retrieved context from {len(search_results)} results")
+                print(f"📄 Context preview: {knowledge_context[:300]}...")
+            else:
+                knowledge_context = "No specific context available."
+                print("⚠️ No search results found")
+        except Exception as e:
+            print(f"❌ Error retrieving from NeonDB: {str(e)}")
             knowledge_context = "No specific context available."
         
-        # Generate response based on type with strict formatting
-        base_prompt = f"""You are the AI Answer Generation Agent for RapidRFP, an app that helps its users respond to questionnaires based on company knowledge.
+        # Check if the context contains actual company information or just questionnaire templates
+        context_has_company_info = any(
+            keyword in knowledge_context.lower() 
+            for keyword in ['merger', 'acquisition', 'acquire', 'merge', 'organization', 'company', 'business', 'corporate']
+        ) and not all(
+            template_indicator in knowledge_context.lower() 
+            for template_indicator in ['questions', 'questionnaire', 'rfp', 'request for']
+        )
+        
+        print(f"🔍 Context analysis: Has company info: {context_has_company_info}")
+        
+        # Generate response based on type with adaptive prompting
+        if context_has_company_info:
+            # Use strict company knowledge prompt when we have relevant context
+            base_prompt = f"""You are the AI Answer Generation Agent for RapidRFP, an app that helps its users respond to questionnaires based on company knowledge.
 Your job is to produce a clear, accurate, professional, and compliant response to the question based ONLY on the relevant text provided.
 
-You must follow all rules exactly.
-
-----------------------------------------------------------------------
-### CORE RULES
-----------------------------------------------------------------------
-1. **Only use information from the Relevant Text.**  
-   - Do NOT invent, assume, or bring any external context.
-   - If the answer cannot be found in the text, say so clearly.
-   - You may however use universally accepted common knowledge (such as historical dates, countries, well-known institutions, or standard definitions), but you may NOT introduce any company-specific, technical, or contextual facts that are not present in the provided text.
-
-2. **Maintain a proposal-ready, polished, professional tone.**
-
-3. **Be concise.**  
-   - Do NOT copy long sections verbatim unless necessary.
-   - Try to maintain the tone of the text that is used in the provided relevant text.
-   - Only output the final formatted answer. Do not include commentary, system thoughts, or reasoning.
-
-4. **Stay strictly on-topic.**
-   - Extract only what is directly needed to answer the question.
-   - Remove irrelevant information, disclaimers, history, or noise.
-
-5. **Synthesize when needed.**  
-   - Convert raw text into a clean, unified answer.
-   - Do not include line numbers, markup, or artifacts.
-
-6. **If information is partially present, synthesize only from what exists.**  
-   - Never fill gaps with outside knowledge.
-
-----------------------------------------------------------------------
-### WHEN INFORMATION IS MISSING
-----------------------------------------------------------------------
-If the relevant text does not contain enough information to answer the question, respond with:
-
-"Can't answer from company knowledge. Try Smart Answer."
-
-Do NOT attempt to guess or fill missing content.
-
+Important Rules:
+• Only use information from the Relevant Text.
+• Do not assume, invent, or include any external facts.
+• Maintain a professional and proposal-ready tone.
+• Follow the response format exactly as specified for each answer type.
 
 Relevant Text:
 {knowledge_context}
 
 Question: {question_text}
+
+"""
+        else:
+            # Use a more general prompt when context is not directly relevant
+            base_prompt = f"""You are assisting in responding to an RFP questionnaire. The question requires information that may not be available in the provided context.
+
+Question: {question_text}
+
+When specific company information is not available, provide a professional response that acknowledges this limitation while maintaining proposal readiness.
+
+For questions about mergers, acquisitions, or corporate activities where no specific information is provided, respond with a professional statement indicating that the company has not engaged in such activities during the specified timeframe, or that this information is not available in the current documentation.
+
+Relevant Context:
+{knowledge_context}
 
 """
 
@@ -8642,20 +8654,20 @@ Question: {question_text}
         else:  # short_answer or default
             prompt = base_prompt + "Provide a concise, professional answer in 1-2 sentences."
         
-        # Use Vertex AI Gemini with very low temperature
-        from vertexai.generative_models import GenerativeModel, GenerationConfig
-        model = GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(
-            prompt,
-            generation_config=GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=500,
-                top_p=0.8,
-                top_k=10
-            )
+        # Use ChatGPT instead of Vertex AI
+        from llm_integration import ChatGPTLLMClient
+        client = ChatGPTLLMClient()
+        
+        llm_result = client.simple_generate(
+            prompt=prompt,
+            max_tokens=500,
+            temperature=0.1
         )
         
-        generated_text = response.text.strip()
+        if llm_result["success"]:
+            generated_text = llm_result["response"].strip()
+        else:
+            raise Exception(f"LLM generation failed: {llm_result.get('error', 'Unknown error')}")
         
         return jsonify({
             'success': True,
