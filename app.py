@@ -8593,25 +8593,11 @@ def generate_questionnaire_response():
             print(f"❌ Error retrieving from NeonDB: {str(e)}")
             knowledge_context = "No specific context available."
         
-        # Check if the context contains actual company information or just questionnaire templates
-        context_has_company_info = any(
-            keyword in knowledge_context.lower() 
-            for keyword in ['merger', 'acquisition', 'acquire', 'merge', 'organization', 'company', 'business', 'corporate']
-        ) and not all(
-            template_indicator in knowledge_context.lower() 
-            for template_indicator in ['questions', 'questionnaire', 'rfp', 'request for']
-        )
-        
-        print(f"🔍 Context analysis: Has company info: {context_has_company_info}")
-        
-        # Generate response based on type with adaptive prompting
-        if context_has_company_info:
-            # Use strict company knowledge prompt when we have relevant context
-            base_prompt = f"""You are the AI Answer Generation Agent for RapidRFP, an app that helps its users respond to questionnaires based on company knowledge.
-Your job is to produce a clear, accurate, professional, and compliant response to the question based ONLY on the relevant text provided.
+        # Generate response using single base prompt
+        base_prompt = f"""You are assisting in responding to an RFP questionnaire. You will be provided one question and the relevant document text that contains the information needed to answer it.
 
 Important Rules:
-• Only use information from the Relevant Text.
+• Only use the information provided in the relevant text.
 • Do not assume, invent, or include any external facts.
 • Maintain a professional and proposal-ready tone.
 • Follow the response format exactly as specified for each answer type.
@@ -8620,20 +8606,6 @@ Relevant Text:
 {knowledge_context}
 
 Question: {question_text}
-
-"""
-        else:
-            # Use a more general prompt when context is not directly relevant
-            base_prompt = f"""You are assisting in responding to an RFP questionnaire. The question requires information that may not be available in the provided context.
-
-Question: {question_text}
-
-When specific company information is not available, provide a professional response that acknowledges this limitation while maintaining proposal readiness.
-
-For questions about mergers, acquisitions, or corporate activities where no specific information is provided, respond with a professional statement indicating that the company has not engaged in such activities during the specified timeframe, or that this information is not available in the current documentation.
-
-Relevant Context:
-{knowledge_context}
 
 """
 
