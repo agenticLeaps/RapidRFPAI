@@ -7294,9 +7294,76 @@ def upload_file_v2():
             except:
                 pass
 
+def download_from_gcs(gcs_path):
+    """Download file content from GCS path"""
+    try:
+        print(f"☁️ Downloading from GCS: {gcs_path}")
+        
+        # Remove gs:// prefix if present
+        if gcs_path.startswith('gs://'):
+            gcs_path = gcs_path[5:]
+
+        # Split bucket and object path
+        parts = gcs_path.split('/', 1)
+        if len(parts) < 2:
+            print(f"❌ Invalid GCS path format: {gcs_path}")
+            return None
+            
+        bucket_name = parts[0]
+        object_name = parts[1]
+        
+        print(f"📦 GCS Bucket: {bucket_name}, Object: {object_name}")
+
+        # Initialize Google Cloud Storage client with proper credentials
+        from google.cloud import storage
+        import json
+        
+        # Try to get credentials from environment
+        gcs_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        
+        if gcs_credentials:
+            # Check if it's a JSON string or file path
+            if gcs_credentials.startswith('{'):
+                # It's a JSON string - parse it
+                print("🔐 Using GCS credentials from environment (JSON)")
+                credentials_info = json.loads(gcs_credentials)
+                from google.oauth2 import service_account
+                credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                client = storage.Client(credentials=credentials, project=credentials_info.get('project_id'))
+            else:
+                # It's a file path
+                print(f"🔐 Using GCS credentials from file: {gcs_credentials}")
+                client = storage.Client.from_service_account_json(gcs_credentials)
+        else:
+            # Try default credentials (for GCP environments)
+            print("🔐 Using default GCS credentials")
+            client = storage.Client()
+        
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        
+        # Check if blob exists
+        if not blob.exists():
+            print(f"❌ GCS object does not exist: {gcs_path}")
+            return None
+
+        file_content = blob.download_as_bytes()
+        print(f"✅ Downloaded {len(file_content)} bytes from GCS")
+        return file_content
+
+    except ImportError:
+        print("❌ Google Cloud Storage client not available. Install: pip install google-cloud-storage")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"❌ Invalid JSON in GCS credentials: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error downloading from GCS: {e}")
+        return None
+
 @app.route("/api/v3/upload", methods=["POST", "OPTIONS"])
 def upload_file_v3():
-    """V3 Upload endpoint - Direct LlamaIndex processing with custom HF embeddings"""
+    """V3 Upload endpoint - Direct LlamaIndex processing with custom HF embeddings and GCS support"""
     if request.method == "OPTIONS":
         return "", 200
     
@@ -7305,47 +7372,83 @@ def upload_file_v3():
         
     save_path = None
     try:
-        org_id = request.args.get("orgId")
-        file_id = request.args.get("fileId")
-        user_id = request.args.get("userId")
+        # Get parameters (check both form and args for flexibility)
+        org_id = request.form.get("orgId") or request.args.get("orgId")
+        file_id = request.form.get("fileId") or request.args.get("fileId")
+        user_id = request.form.get("userId") or request.args.get("userId")
+        from_gcs = request.form.get('fromGCS', 'false').lower() == 'true'
         
-        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}")
+        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, fromGCS={from_gcs}")
         
         if not org_id or not file_id or not user_id:
             return jsonify({"error": "orgId, fileId, and userId are required"}), 400
 
-        if "file" not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+        # Handle GCS vs traditional file upload
+        if from_gcs:
+            # Handle GCS path processing
+            gcs_path = request.form.get('gcsPath')
+            if not gcs_path:
+                return jsonify({"error": "GCS path is required when fromGCS=true"}), 400
 
-        file = request.files["file"]
-        filename = file.filename
+            print(f"☁️ V3 Processing GCS file: {gcs_path}")
+            
+            # Extract file info from GCS path
+            filename = gcs_path.split('/')[-1]  # Get filename from path
+            if not filename:
+                return jsonify({"error": "Invalid GCS path - cannot extract filename"}), 400
+            
+            # Download file from GCS to process it
+            file_content = download_from_gcs(gcs_path)
+            if not file_content:
+                return jsonify({"error": "Failed to download file from GCS"}), 500
+            
+            # Save GCS content to temporary file
+            timestamp = int(time.time())
+            safe_filename = f"{file_id}_{filename}"
+            save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+            
+            with open(save_path, 'wb') as f:
+                f.write(file_content)
+            print(f"✅ V3 GCS file saved locally: {save_path}")
+            
+        else:
+            # Traditional file upload handling
+            if "file" not in request.files:
+                return jsonify({"error": "No file provided"}), 400
+
+            file = request.files["file"]
+            filename = file.filename
+            
+            if not filename:
+                return jsonify({"error": "No file selected"}), 400
+            
+            # Save uploaded file
+            timestamp = int(time.time())
+            safe_filename = f"{file_id}_{filename}"
+            save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+            
+            file.save(save_path)
+            print(f"✅ V3 File saved: {save_path}")
+        
+        # Common processing for both GCS and traditional uploads
+        if not os.path.exists(save_path):
+            return jsonify({"error": "Failed to save file"}), 500
+            
+        file_size = os.path.getsize(save_path)
+        print(f"📏 File size: {file_size} bytes")
         
         # Fix double extension issue
         if filename.count('.') > 1:
             parts = filename.split('.')
             if len(parts) >= 2 and parts[-1].lower() == parts[-2].lower():
                 filename = '.'.join(parts[:-1])
-                print(f"🔧 Fixed double extension: {file.filename} -> {filename}")
+                print(f"🔧 Fixed double extension: {filename}")
         
         file_ext = filename.split(".")[-1].lower()
         print(f"📋 V3 Processing file type: {file_ext} (direct LlamaIndex processing)")
 
         # Notify backend: processing started
         notify_backend_status(file_id, user_id, 'processing', False, source="flask_ai_v3")
-        
-        # Save file temporarily
-        timestamp = int(time.time())
-        safe_filename = f"{file_id}_{filename}"
-        save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
-        
-        file.save(save_path)
-        print(f"✅ V3 File saved: {save_path}")
-        
-        if not os.path.exists(save_path):
-            return jsonify({"error": "Failed to save file"}), 500
-            
-        file_size = os.path.getsize(save_path)
-        print(f"📏 File size: {file_size} bytes")
         
         # Notify backend: embedding phase started
         notify_backend_status(file_id, user_id, 'embedding', False, source="flask_ai_v3")
