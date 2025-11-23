@@ -10,7 +10,7 @@ import json
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from simple_custom_embedding import get_embeddings_from_hf_endpoint
-
+ 
 load_dotenv()
 
 class DirectNeonDBStorage:
