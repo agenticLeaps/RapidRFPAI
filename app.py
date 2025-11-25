@@ -7697,11 +7697,11 @@ def upload_file_v3():
                 
                 print(f"✅ V3 Direct storage result: {result}")
                 
-                if result.get("success"):
+                if result.get("success") and rag_version != "v2":
                     # Success - notify completion
                     notify_backend_status(file_id, user_id, 'completed', True, source="flask_ai_v3")
                     print(f"✅ V3 Processing complete: {result.get('chunks_stored', 0)} chunks stored")
-                else:
+                elif not result.get("success"):
                     # Direct storage failed
                     error_msg = result.get("error", "Unknown storage error")
                     print(f"❌ V3 Direct storage failed: {error_msg}")
