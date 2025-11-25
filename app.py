@@ -19,6 +19,15 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import zipfile
 import io
+import ssl
+import urllib3
+import certifi
+
+# SSL Certificate fix for LlamaParse
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['CURL_CA_BUNDLE'] = certifi.where()
 
 # Load environment variables
 load_dotenv()
@@ -7361,6 +7370,208 @@ def download_from_gcs(gcs_path):
         print(f"❌ Error downloading from GCS: {e}")
         return None
 
+def call_noderag_service(org_id, file_id, user_id, chunks):
+    """Send chunks to NodeRAG service for processing via API"""
+    try:
+        print(f"🔗 Sending {len(chunks)} chunks to NodeRAG service for fileId={file_id}")
+        
+        # Get NodeRAG service URL from environment
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        # Prepare callback URL for status updates
+        main_server_url = os.getenv("MAIN_SERVER_URL", "http://localhost:5000")
+        callback_url = f"{main_server_url}/api/webhook/noderag"
+        
+        # Prepare API payload
+        payload = {
+            "org_id": org_id,
+            "file_id": file_id,
+            "user_id": user_id,
+            "chunks": chunks,
+            "callback_url": callback_url
+        }
+        
+        # Make API call to NodeRAG service
+        response = requests.post(
+            f"{noderag_url}/api/v1/process-document",
+            json=payload,
+            timeout=30,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 202:
+            result = response.json()
+            print(f"✅ NodeRAG service accepted processing request: {result}")
+            return {
+                "success": True,
+                "message": result.get("message", "Processing started"),
+                "file_id": file_id,
+                "status": "processing",
+                "processing_method": "noderag_v2_api"
+            }
+        else:
+            print(f"❌ NodeRAG service error: {response.status_code} - {response.text}")
+            return {
+                "success": False,
+                "error": f"NodeRAG service error: {response.status_code}",
+                "details": response.text
+            }
+        
+    except requests.exceptions.ConnectionError:
+        print(f"❌ NodeRAG service unavailable - connection error")
+        return {
+            "success": False,
+            "error": "NodeRAG service unavailable - please check if the service is running"
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ NodeRAG service timeout")
+        return {
+            "success": False,
+            "error": "NodeRAG service timeout - request took too long"
+        }
+    except Exception as e:
+        print(f"❌ NodeRAG API call error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename):
+    """Extract chunks using existing v1 processing pipeline"""
+    try:
+        from direct_neondb_storage import process_file_direct_storage
+        
+        print(f"📄 Extracting chunks using v1 pipeline for NodeRAG...")
+        
+        # Temporarily modify the direct storage function to return chunks
+        # We'll extract the chunking logic
+        file_ext = filename.split('.')[-1].lower()
+        documents = []
+        
+        # Use the same logic as in direct_neondb_storage.py
+        llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
+        
+        if file_ext in llamaparse_supported:
+            try:
+                from llamaparse_ssl_fix import parse_document_with_ssl_fix
+                
+                print(f"📊 Parsing {filename} with LlamaParse for NodeRAG...")
+                documents = parse_document_with_ssl_fix(
+                    file_path=file_path,
+                    api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
+                    result_type="markdown",
+                    verbose=True,
+                    language="en"
+                )
+                print(f"✅ LlamaParse loaded {len(documents)} document(s)")
+                
+            except Exception as e:
+                print(f"⚠️ LlamaParse failed: {str(e)}")
+                documents = []
+        
+        # Fallback to simple text reading if needed
+        if not documents:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                from llama_index.core import Document
+                documents = [Document(text=content)]
+            except Exception as e:
+                print(f"❌ Text extraction failed: {e}")
+                return None
+        
+        # Add metadata to documents
+        for doc in documents:
+            doc.metadata.update({
+                "file_id": file_id,
+                "org_id": org_id,
+                "user_id": user_id,
+                "filename": filename,
+                "file_extension": file_ext
+            })
+        
+        # Parse into chunks using LlamaIndex
+        try:
+            from llama_index.core.node_parser import SentenceSplitter
+            
+            chunk_size = int(os.getenv("LLAMAINDEX_CHUNK_SIZE", "1024"))
+            chunk_overlap = int(os.getenv("LLAMAINDEX_CHUNK_OVERLAP", "20"))
+            
+            node_parser = SentenceSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap
+            )
+            
+            nodes = node_parser.get_nodes_from_documents(documents)
+            print(f"✂️ Created {len(nodes)} chunks for NodeRAG")
+            
+            # Convert to format expected by NodeRAG API
+            chunks = []
+            for i, node in enumerate(nodes):
+                chunks.append({
+                    'content': node.text,
+                    'text': node.text,  # Alternative key
+                    'metadata': {
+                        **node.metadata,
+                        'chunk_index': i,
+                        'total_chunks': len(nodes)
+                    }
+                })
+            
+            return chunks
+            
+        except Exception as e:
+            print(f"⚠️ Chunking failed: {str(e)}")
+            # Simple fallback chunking
+            all_text = " ".join([doc.text for doc in documents])
+            chunk_size = 1024
+            chunks = []
+            
+            words = all_text.split()
+            current_chunk = []
+            current_length = 0
+            
+            for word in words:
+                current_chunk.append(word)
+                current_length += len(word) + 1
+                
+                if current_length >= chunk_size:
+                    chunk_text = " ".join(current_chunk)
+                    chunks.append({
+                        'content': chunk_text,
+                        'text': chunk_text,
+                        'metadata': {
+                            'file_id': file_id,
+                            'org_id': org_id,
+                            'user_id': user_id,
+                            'filename': filename,
+                            'chunk_index': len(chunks)
+                        }
+                    })
+                    current_chunk = []
+                    current_length = 0
+            
+            # Add remaining chunk
+            if current_chunk:
+                chunk_text = " ".join(current_chunk)
+                chunks.append({
+                    'content': chunk_text,
+                    'text': chunk_text,
+                    'metadata': {
+                        'file_id': file_id,
+                        'org_id': org_id,
+                        'user_id': user_id,
+                        'filename': filename,
+                        'chunk_index': len(chunks)
+                    }
+                })
+            
+            print(f"✂️ Created {len(chunks)} chunks (fallback method)")
+            return chunks
+            
+    except Exception as e:
+        print(f"❌ Chunk extraction error: {e}")
+        return None
+
 @app.route("/api/v3/upload", methods=["POST", "OPTIONS"])
 def upload_file_v3():
     """V3 Upload endpoint - Direct LlamaIndex processing with custom HF embeddings and GCS support"""
@@ -7376,9 +7587,10 @@ def upload_file_v3():
         org_id = request.form.get("orgId") or request.args.get("orgId")
         file_id = request.form.get("fileId") or request.args.get("fileId")
         user_id = request.form.get("userId") or request.args.get("userId")
+        rag_version = request.form.get("ragversion") or request.args.get("ragversion", "v1")
         from_gcs = request.form.get('fromGCS', 'false').lower() == 'true'
         
-        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, fromGCS={from_gcs}")
+        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, ragversion={rag_version}, fromGCS={from_gcs}")
         
         if not org_id or not file_id or not user_id:
             return jsonify({"error": "orgId, fileId, and userId are required"}), 400
@@ -7460,16 +7672,28 @@ def upload_file_v3():
         
         def process_file_v3_async():
             try:
-                print(f"🚀 V3 Starting direct NeonDB processing...")
-                from direct_neondb_storage import process_file_direct_storage
-                
-                result = process_file_direct_storage(
-                    file_path=save_path,
-                    file_id=file_id,
-                    org_id=org_id,
-                    user_id=user_id,
-                    filename=filename
-                )
+                if rag_version == "v2":
+                    print(f"🚀 V3 Starting NodeRAG v2 processing...")
+                    
+                    # Extract chunks using v1 pipeline
+                    chunks = get_chunks_from_v1_processing(save_path, file_id, org_id, user_id, filename)
+                    if not chunks:
+                        raise Exception("Failed to extract chunks from file")
+                    
+                    # Send to NodeRAG service
+                    result = call_noderag_service(org_id, file_id, user_id, chunks)
+                    
+                else:
+                    print(f"🚀 V3 Starting direct NeonDB processing (v1)...")
+                    from direct_neondb_storage import process_file_direct_storage
+                    
+                    result = process_file_direct_storage(
+                        file_path=save_path,
+                        file_id=file_id,
+                        org_id=org_id,
+                        user_id=user_id,
+                        filename=filename
+                    )
                 
                 print(f"✅ V3 Direct storage result: {result}")
                 
@@ -7496,16 +7720,30 @@ def upload_file_v3():
         Thread(target=process_file_v3_async, daemon=True).start()
         
         # Return immediate response
-        return jsonify({
-            "message": "File upload successful, processing started with direct NeonDB storage",
-            "file_id": file_id,
-            "filename": filename,
-            "status": "processing",
-            "processing_method": "direct_neondb_v3",
-            "embedding_model": "custom_hf_endpoint",
-            "vector_dimension": os.getenv("VECTOR_DIM", "2560"),
-            "note": "Using LlamaIndex parsing with direct database storage, bypassing vector store"
-        }), 202
+        if rag_version == "v2":
+            return jsonify({
+                "message": "File upload successful, processing started with NodeRAG v2",
+                "file_id": file_id,
+                "filename": filename,
+                "status": "processing",
+                "rag_version": "v2",
+                "processing_method": "noderag_v2_api",
+                "embedding_model": "openai_embeddings",
+                "vector_dimension": "1536",
+                "note": "Using NodeRAG graph-based processing with semantic understanding"
+            }), 202
+        else:
+            return jsonify({
+                "message": "File upload successful, processing started with direct NeonDB storage",
+                "file_id": file_id,
+                "filename": filename,
+                "status": "processing",
+                "rag_version": "v1",
+                "processing_method": "direct_neondb_v3",
+                "embedding_model": "custom_hf_endpoint",
+                "vector_dimension": os.getenv("VECTOR_DIM", "2560"),
+                "note": "Using LlamaIndex parsing with direct database storage, bypassing vector store"
+            }), 202
             
     except Exception as e:
         print(f"❌ V3 Upload error: {str(e)}")
@@ -7519,6 +7757,284 @@ def upload_file_v3():
         if 'user_id' in locals() and 'file_id' in locals():
             notify_backend_status(file_id, user_id, 'failed', False, str(e))
         
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/webhook/noderag", methods=["POST"])
+def noderag_webhook():
+    """Webhook endpoint to receive status updates from NodeRAG service"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No data received"}), 400
+        
+        status = data.get("status")
+        timestamp = data.get("timestamp")
+        webhook_data = data.get("data", {})
+        
+        file_id = webhook_data.get("file_id")
+        
+        if not file_id:
+            print(f"⚠️ NodeRAG webhook missing file_id: {data}")
+            return jsonify({"error": "Missing file_id in webhook data"}), 400
+        
+        print(f"📨 NodeRAG webhook received: status={status}, file_id={file_id}")
+        
+        # Map NodeRAG statuses to backend notifications
+        if status == "processing":
+            phase = webhook_data.get("phase", "initialization")
+            progress = webhook_data.get("progress", 0)
+            notify_backend_status(
+                file_id, 
+                None,  # user_id not always available in webhook
+                'processing', 
+                False, 
+                f"NodeRAG {phase} - {progress}%",
+                source="noderag_v2"
+            )
+            
+        elif status == "phase1_started":
+            notify_backend_status(
+                file_id, None, 'processing', False, 
+                "NodeRAG: Graph decomposition started", 
+                source="noderag_v2"
+            )
+            
+        elif status == "phase2_started":
+            notify_backend_status(
+                file_id, None, 'processing', False, 
+                "NodeRAG: Graph augmentation started", 
+                source="noderag_v2"
+            )
+            
+        elif status == "phase3_started":
+            notify_backend_status(
+                file_id, None, 'processing', False, 
+                "NodeRAG: Embedding generation started", 
+                source="noderag_v2"
+            )
+            
+        elif status == "completed":
+            results = webhook_data.get("results", {})
+            chunks_processed = results.get("chunks_processed", 0)
+            embeddings_stored = results.get("embeddings_stored", 0)
+            
+            notify_backend_status(
+                file_id, None, 'completed', True,
+                f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
+                source="noderag_v2"
+            )
+            print(f"✅ NodeRAG processing completed for file_id={file_id}")
+            
+        elif status == "failed":
+            error_msg = webhook_data.get("error", "Unknown NodeRAG error")
+            notify_backend_status(
+                file_id, None, 'failed', False,
+                f"NodeRAG failed: {error_msg}",
+                source="noderag_v2"
+            )
+            print(f"❌ NodeRAG processing failed for file_id={file_id}: {error_msg}")
+        
+        else:
+            print(f"⚠️ Unknown NodeRAG webhook status: {status}")
+        
+        return jsonify({
+            "message": "Webhook processed successfully",
+            "status": status,
+            "file_id": file_id
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ NodeRAG webhook error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+def search_noderag_service(org_id, query, top_k=10, filters=None):
+    """Search NodeRAG service via API"""
+    try:
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        payload = {
+            "org_id": org_id,
+            "query": query,
+            "top_k": top_k,
+            "filters": filters or {}
+        }
+        
+        response = requests.post(
+            f"{noderag_url}/api/v1/search",
+            json=payload,
+            timeout=30,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return {
+                "success": True,
+                "results": result.get("results", []),
+                "count": result.get("count", 0),
+                "source": "noderag_v2"
+            }
+        else:
+            print(f"❌ NodeRAG search error: {response.status_code} - {response.text}")
+            return {
+                "success": False,
+                "error": f"NodeRAG search error: {response.status_code}",
+                "results": []
+            }
+    
+    except requests.exceptions.ConnectionError:
+        print(f"❌ NodeRAG service unavailable for search")
+        return {
+            "success": False,
+            "error": "NodeRAG service unavailable",
+            "results": []
+        }
+    except Exception as e:
+        print(f"❌ NodeRAG search API error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "results": []
+        }
+
+@app.route("/api/v3/search", methods=["POST", "OPTIONS"])
+def search_v3_unified():
+    """V3 Unified Search endpoint - searches both v1 and v2 data"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.get_json()
+        query = data.get("query")
+        org_id = data.get("orgId")
+        top_k = data.get("top_k", 10)
+        file_ids = data.get("fileIds")  # Optional
+        rag_version = data.get("ragversion", "both")  # v1, v2, or both
+        
+        if not query or not org_id:
+            return jsonify({"error": "Missing required fields: query, orgId"}), 400
+        
+        print(f"🔍 V3 Unified Search: query='{query[:50]}...', org_id={org_id}, version={rag_version}")
+        
+        results = {
+            "query": query,
+            "org_id": org_id,
+            "rag_version": rag_version,
+            "total_results": 0,
+            "sources": {},
+            "combined_results": []
+        }
+        
+        # Search v1 (naive RAG) if requested
+        if rag_version in ["v1", "both"]:
+            try:
+                print("🔍 Searching v1 (naive RAG) data...")
+                from retrieval_system import search_documents
+                v1_results = search_documents(
+                    query=query,
+                    org_id=org_id,
+                    top_k=top_k // 2 if rag_version == "both" else top_k,
+                    file_ids=file_ids
+                )
+                
+                # Add source information to v1 results
+                for result in v1_results:
+                    result["rag_version"] = "v1"
+                    result["source_type"] = "naive_rag"
+                
+                results["sources"]["v1"] = {
+                    "count": len(v1_results),
+                    "source_type": "naive_rag"
+                }
+                results["combined_results"].extend(v1_results)
+                
+                print(f"✅ Found {len(v1_results)} v1 results")
+                
+            except Exception as e:
+                print(f"⚠️ V1 search failed: {e}")
+                results["sources"]["v1"] = {
+                    "count": 0,
+                    "error": str(e),
+                    "source_type": "naive_rag"
+                }
+        
+        # Search v2 (NodeRAG) if requested
+        if rag_version in ["v2", "both"]:
+            try:
+                print("🔍 Searching v2 (NodeRAG) data...")
+                search_filters = {}
+                if file_ids:
+                    # For NodeRAG, we need to search across multiple file_ids
+                    # For now, we'll search without file filter and filter results later
+                    pass
+                
+                noderag_response = search_noderag_service(
+                    org_id=org_id,
+                    query=query,
+                    top_k=top_k // 2 if rag_version == "both" else top_k,
+                    filters=search_filters
+                )
+                
+                if noderag_response["success"]:
+                    v2_results = noderag_response["results"]
+                    
+                    # Add source information to v2 results and filter by file_ids if needed
+                    filtered_v2_results = []
+                    for result in v2_results:
+                        if file_ids and result.get("file_id") not in file_ids:
+                            continue
+                        
+                        result["rag_version"] = "v2"
+                        result["source_type"] = "noderag"
+                        # Normalize result format for consistency
+                        if "similarity_score" in result:
+                            result["score"] = result["similarity_score"]
+                        
+                        filtered_v2_results.append(result)
+                    
+                    results["sources"]["v2"] = {
+                        "count": len(filtered_v2_results),
+                        "source_type": "noderag"
+                    }
+                    results["combined_results"].extend(filtered_v2_results)
+                    
+                    print(f"✅ Found {len(filtered_v2_results)} v2 results")
+                else:
+                    print(f"⚠️ V2 search failed: {noderag_response.get('error')}")
+                    results["sources"]["v2"] = {
+                        "count": 0,
+                        "error": noderag_response.get("error"),
+                        "source_type": "noderag"
+                    }
+                    
+            except Exception as e:
+                print(f"⚠️ V2 search failed: {e}")
+                results["sources"]["v2"] = {
+                    "count": 0,
+                    "error": str(e),
+                    "source_type": "noderag"
+                }
+        
+        # Sort combined results by score if available
+        try:
+            results["combined_results"].sort(
+                key=lambda x: x.get("score", x.get("similarity_score", 0)), 
+                reverse=True
+            )
+        except:
+            pass
+        
+        # Limit to requested top_k
+        results["combined_results"] = results["combined_results"][:top_k]
+        results["total_results"] = len(results["combined_results"])
+        
+        print(f"✅ V3 Unified Search complete: {results['total_results']} total results")
+        
+        return jsonify(results), 200
+        
+    except Exception as e:
+        print(f"❌ V3 Unified Search error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/v2/search", methods=["POST", "OPTIONS"])
@@ -10107,6 +10623,91 @@ def store_embeddings_in_firestore(embeddings, chunks, file_id, org_id, filename)
         print(f"❌ Firestore storage error: {e}")
         raise e
 
+def generate_noderag_response(query, org_id, conversation_history="", data=None):
+    """Generate response using NodeRAG v2 service"""
+    try:
+        print(f"🤖 Generating NodeRAG response for: '{query[:100]}...'")
+        
+        # Get NodeRAG service URL
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        # Prepare payload for NodeRAG response generation
+        payload = {
+            "org_id": org_id,
+            "query": query,
+            "conversation_history": conversation_history,
+            "max_tokens": data.get("max_tokens", 2048) if data else 2048,
+            "temperature": data.get("temperature", 0.7) if data else 0.7
+        }
+        
+        # Call NodeRAG generate-response endpoint
+        response = requests.post(
+            f"{noderag_url}/api/v1/generate-response",
+            json=payload,
+            timeout=60,  # Longer timeout for response generation
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Format response in chat format
+            chat_response = {
+                "response": result.get("response", ""),
+                "query": query,
+                "orgId": org_id,
+                "source": "noderag_v2",
+                "metadata": {
+                    "rag_version": "v2",
+                    "processing_type": "noderag",
+                    "algorithm_used": result.get("algorithm_used", "NodeRAG Advanced Search"),
+                    "confidence": result.get("confidence", 0.0),
+                    "sources": result.get("sources", []),
+                    "node_types": result.get("node_types", {}),
+                    "context_used": result.get("context_used", 0),
+                    "search_results": result.get("search_results", 0),
+                    "search_components": result.get("search_components", {}),
+                    "retrieval_metadata": result.get("retrieval_metadata", {})
+                }
+            }
+            
+            print(f"✅ NodeRAG response generated successfully with {len(result.get('sources', []))} sources")
+            return jsonify(chat_response)
+            
+        else:
+            error_msg = f"NodeRAG service error: {response.status_code} - {response.text}"
+            print(f"❌ {error_msg}")
+            return jsonify({
+                "error": error_msg,
+                "fallback": "NodeRAG service unavailable, please try again later"
+            }), 500
+            
+    except requests.exceptions.ConnectionError:
+        error_msg = "NodeRAG service unavailable - connection failed"
+        print(f"❌ {error_msg}")
+        return jsonify({
+            "error": error_msg,
+            "fallback": "NodeRAG service is not running, please contact administrator"
+        }), 503
+        
+    except requests.exceptions.Timeout:
+        error_msg = "NodeRAG service timeout - response generation took too long"
+        print(f"❌ {error_msg}")
+        return jsonify({
+            "error": error_msg,
+            "fallback": "Response generation timed out, please try a simpler query"
+        }), 504
+        
+    except Exception as e:
+        error_msg = f"NodeRAG response generation error: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": error_msg,
+            "fallback": "An error occurred while generating response"
+        }), 500
+
 @app.route("/api/v3/chat", methods=["POST", "OPTIONS"])
 def chat_v3():
     """V3 Chat endpoint - Simple query with smart defaults"""
@@ -10122,13 +10723,24 @@ def chat_v3():
         query = data.get("query")
         org_id = data.get("orgId")  # Get orgId from request
         conversation_history = data.get("conversationHistory", "")  # Get conversation history
+        rag_version = data.get("ragversion", "v1")  # Get ragversion parameter
         
         print(f"💬 V3 Chat query: '{query[:100]}...'")
         print(f"🏢 V3 Chat orgId: {org_id}")
+        print(f"🔧 V3 Chat ragversion: {rag_version}")
         print(f"📜 V3 Chat conversation history: {conversation_history[:100]}..." if conversation_history else "📜 No conversation history")
         
         if not query:
             return jsonify({"error": "Query is required"}), 400
+        
+        # Handle different RAG versions
+        if rag_version == "v2":
+            # Use NodeRAG for response generation
+            print("🤖 Using NodeRAG v2 for response generation...")
+            return generate_noderag_response(query, org_id, conversation_history, data)
+        else:
+            # Use existing v1 naive RAG flow
+            print("🤖 Using naive RAG v1 for response generation...")
         
         # Use provided orgId or default to None (search all orgs)
         user_id = "api-user"  # Default user

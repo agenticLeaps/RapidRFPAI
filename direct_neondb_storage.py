@@ -10,6 +10,15 @@ import json
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from simple_custom_embedding import get_embeddings_from_hf_endpoint
+import ssl
+import urllib3
+import certifi
+
+# SSL Certificate fix for LlamaParse
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['CURL_CA_BUNDLE'] = certifi.where()
  
 load_dotenv()
 
@@ -340,20 +349,18 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
     if file_ext in llamaparse_supported:
         print(f"🚀 Using LlamaParse for {file_ext.upper()} file")
         try:
-            from llama_parse import LlamaParse
-            
-            # Initialize LlamaParse
-            parser = LlamaParse(
-                api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
-                result_type="markdown",  # Get markdown for better structure
-                verbose=True,
-                language="en"
-            )
+            from llamaparse_ssl_fix import parse_document_with_ssl_fix
             
             # Parse the document
             print(f"📊 Parsing {filename} with LlamaParse...")
             print(f"🔄 About to call parser.load_data({file_path})")
-            documents = parser.load_data(file_path)
+            documents = parse_document_with_ssl_fix(
+                file_path=file_path,
+                api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
+                result_type="markdown",
+                verbose=True,
+                language="en"
+            )
             print(f"✅ parser.load_data completed successfully")
             print(f"📄 LlamaParse loaded {len(documents)} document(s)")
             
