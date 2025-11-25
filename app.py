@@ -7773,6 +7773,7 @@ def noderag_webhook():
         webhook_data = data.get("data", {})
         
         file_id = webhook_data.get("file_id")
+        user_id = webhook_data.get("user_id")
         
         if not file_id:
             print(f"⚠️ NodeRAG webhook missing file_id: {data}")
@@ -7786,7 +7787,7 @@ def noderag_webhook():
             progress = webhook_data.get("progress", 0)
             notify_backend_status(
                 file_id, 
-                None,  # user_id not always available in webhook
+                user_id,  # user_id not always available in webhook
                 'processing', 
                 False, 
                 f"NodeRAG {phase} - {progress}%",
@@ -7795,21 +7796,21 @@ def noderag_webhook():
             
         elif status == "phase1_started":
             notify_backend_status(
-                file_id, None, 'processing', False, 
+                file_id, user_id, 'processing', False, 
                 "NodeRAG: Graph decomposition started", 
                 source="noderag_v2"
             )
             
         elif status == "phase2_started":
             notify_backend_status(
-                file_id, None, 'processing', False, 
+                file_id, user_id, 'processing', False, 
                 "NodeRAG: Graph augmentation started", 
                 source="noderag_v2"
             )
             
         elif status == "phase3_started":
             notify_backend_status(
-                file_id, None, 'processing', False, 
+                file_id, user_id, 'processing', False, 
                 "NodeRAG: Embedding generation started", 
                 source="noderag_v2"
             )
@@ -7820,7 +7821,7 @@ def noderag_webhook():
             embeddings_stored = results.get("embeddings_stored", 0)
             
             notify_backend_status(
-                file_id, None, 'completed', True,
+                file_id, user_id, 'completed', True,
                 f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
                 source="noderag_v2"
             )
@@ -7829,7 +7830,7 @@ def noderag_webhook():
         elif status == "failed":
             error_msg = webhook_data.get("error", "Unknown NodeRAG error")
             notify_backend_status(
-                file_id, None, 'failed', False,
+                file_id, user_id, 'failed', False,
                 f"NodeRAG failed: {error_msg}",
                 source="noderag_v2"
             )
