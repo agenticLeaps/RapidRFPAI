@@ -3906,7 +3906,7 @@ def delete_file_by_file_id():
 
 @app.route("/api/v2/bulk-delete", methods=["DELETE", "OPTIONS"])
 def bulk_delete_files_v2():
-    """Bulk delete files and their embeddings/chunks from NeonDB - V2 API"""
+    """Bulk delete files and their embeddings/chunks - V2 API with NodeRAG support"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -3914,6 +3914,7 @@ def bulk_delete_files_v2():
         data = request.get_json(silent=True) or {}
         org_id = data.get("orgId")
         file_ids = data.get("fileIds", [])
+        rag_version = data.get("ragversion", "v1")  # Default to v1 (NeonDB)
         
         if not org_id:
             return jsonify({"error": "orgId is required"}), 400
@@ -3924,12 +3925,17 @@ def bulk_delete_files_v2():
         if len(file_ids) > 50:
             return jsonify({"error": "Cannot delete more than 50 files at once"}), 400
 
-        print(f"🗑️ Bulk deleting embeddings for {len(file_ids)} files in org: {org_id}")
+        print(f"🗑️ Bulk deleting embeddings for {len(file_ids)} files in org: {org_id}, ragversion: {rag_version}")
 
-        # Use asyncio to run the deletion function
-        result = asyncio.run(bulk_delete_from_neondb(org_id, file_ids))
-        
-        return jsonify(result["response"]), result["status_code"]
+        # Route based on ragversion
+        if rag_version == "v2":
+            # Use NodeRAG service for deletion
+            result = call_noderag_delete_service(org_id, file_ids)
+            return jsonify(result["response"]), result["status_code"]
+        else:
+            # Use existing NeonDB deletion (v1)
+            result = asyncio.run(bulk_delete_from_neondb(org_id, file_ids))
+            return jsonify(result["response"]), result["status_code"]
 
     except Exception as e:
         error_msg = str(e)
@@ -7435,6 +7441,227 @@ def call_noderag_service(org_id, file_id, user_id, chunks):
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
+def call_noderag_delete_service(org_id, file_ids):
+    """Send delete request to NodeRAG service for bulk deletion via API"""
+    try:
+        print(f"🗑️ Sending delete request to NodeRAG service for {len(file_ids)} files in org: {org_id}")
+        
+        # Get NodeRAG service URL from environment
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        # Prepare callback URL for status updates
+        main_server_url = os.getenv("MAIN_SERVER_URL", "http://localhost:5000")
+        callback_url = f"{main_server_url}/api/webhook/noderag-delete"
+        
+        # Prepare API payload
+        payload = {
+            "org_id": org_id,
+            "file_ids": file_ids,
+            "callback_url": callback_url
+        }
+        
+        # Make API call to NodeRAG service
+        response = requests.delete(
+            f"{noderag_url}/api/v1/delete-embeddings",
+            json=payload,
+            timeout=30,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 202:
+            result = response.json()
+            print(f"✅ NodeRAG delete service accepted request: {result}")
+            return {
+                "status_code": 202,
+                "response": {
+                    "success": True,
+                    "message": result.get("message", "Deletion started"),
+                    "file_ids": file_ids,
+                    "status": "processing",
+                    "processing_method": "noderag_v2_delete"
+                }
+            }
+        else:
+            print(f"❌ NodeRAG delete service error: {response.status_code} - {response.text}")
+            return {
+                "status_code": response.status_code,
+                "response": {
+                    "success": False,
+                    "error": f"NodeRAG delete service error: {response.status_code}",
+                    "details": response.text
+                }
+            }
+        
+    except requests.exceptions.ConnectionError:
+        print(f"❌ NodeRAG delete service unavailable - connection error")
+        return {
+            "status_code": 503,
+            "response": {
+                "success": False,
+                "error": "NodeRAG delete service unavailable - please check if the service is running"
+            }
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ NodeRAG delete service timeout")
+        return {
+            "status_code": 504,
+            "response": {
+                "success": False,
+                "error": "NodeRAG delete service timeout - request took too long"
+            }
+        }
+    except Exception as e:
+        print(f"❌ NodeRAG delete API call error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status_code": 500,
+            "response": {"success": False, "error": str(e)}
+        }
+
+def call_noderag_generate_response(query, org_id, project_id=None, knowledge_base_option="global", conversation_history="", max_results=5):
+    """Send generate response request to NodeRAG service via API"""
+    try:
+        print(f"🤖 Sending generate response request to NodeRAG service for org: {org_id}")
+        
+        # Get NodeRAG service URL from environment
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        # Prepare API payload
+        payload = {
+            "query": query,
+            "org_id": org_id,
+            "project_id": project_id,
+            "knowledge_base_option": knowledge_base_option,
+            "conversation_history": conversation_history,
+            "max_results": max_results
+        }
+        
+        # Make API call to NodeRAG service
+        response = requests.post(
+            f"{noderag_url}/api/v1/generate-response",
+            json=payload,
+            timeout=30,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ NodeRAG generate response successful")
+            return {
+                "status_code": 200,
+                "response": result
+            }
+        else:
+            print(f"❌ NodeRAG generate response error: {response.status_code} - {response.text}")
+            return {
+                "status_code": response.status_code,
+                "response": {
+                    "success": False,
+                    "error": f"NodeRAG generate response error: {response.status_code}",
+                    "details": response.text
+                }
+            }
+        
+    except requests.exceptions.ConnectionError:
+        print(f"❌ NodeRAG service unavailable - connection error")
+        return {
+            "status_code": 503,
+            "response": {
+                "success": False,
+                "error": "NodeRAG service unavailable - please check if the service is running"
+            }
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ NodeRAG service timeout")
+        return {
+            "status_code": 504,
+            "response": {
+                "success": False,
+                "error": "NodeRAG service timeout - request took too long"
+            }
+        }
+    except Exception as e:
+        print(f"❌ NodeRAG generate response API call error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status_code": 500,
+            "response": {"success": False, "error": str(e)}
+        }
+
+def call_noderag_questionnaire_response(questionnaire_id, question_text, response_type, choices, org_id, project_id, knowledge_base_option="global"):
+    """Send questionnaire response request to NodeRAG service via API"""
+    try:
+        print(f"🎯 Sending questionnaire response request to NodeRAG service for org: {org_id}")
+        
+        # Get NodeRAG service URL from environment
+        noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+        
+        # Prepare API payload - map question_text to query for NodeRAG compatibility
+        payload = {
+            "query": question_text,  # NodeRAG expects 'query' field
+            "org_id": org_id,
+            "project_id": project_id,
+            "knowledge_base_option": knowledge_base_option,
+            "questionnaire_id": questionnaire_id,
+            "response_type": response_type,
+            "choices": choices
+        }
+        
+        # Make API call to NodeRAG service
+        response = requests.post(
+            f"{noderag_url}/api/v1/generate-response",
+            json=payload,
+            timeout=30,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ NodeRAG questionnaire response successful")
+            return {
+                "status_code": 200,
+                "response": result
+            }
+        else:
+            print(f"❌ NodeRAG questionnaire response error: {response.status_code} - {response.text}")
+            return {
+                "status_code": response.status_code,
+                "response": {
+                    "success": False,
+                    "error": f"NodeRAG questionnaire response error: {response.status_code}",
+                    "details": response.text
+                }
+            }
+        
+    except requests.exceptions.ConnectionError:
+        print(f"❌ NodeRAG service unavailable - connection error")
+        return {
+            "status_code": 503,
+            "response": {
+                "success": False,
+                "error": "NodeRAG service unavailable - please check if the service is running"
+            }
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ NodeRAG service timeout")
+        return {
+            "status_code": 504,
+            "response": {
+                "success": False,
+                "error": "NodeRAG service timeout - request took too long"
+            }
+        }
+    except Exception as e:
+        print(f"❌ NodeRAG questionnaire response API call error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status_code": 500,
+            "response": {"success": False, "error": str(e)}
+        }
+
 def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename):
     """Extract chunks using existing v1 processing pipeline"""
     try:
@@ -7847,6 +8074,57 @@ def noderag_webhook():
         
     except Exception as e:
         print(f"❌ NodeRAG webhook error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/webhook/noderag-delete", methods=["POST"])
+def noderag_delete_webhook():
+    """Webhook endpoint to receive deletion status updates from NodeRAG service"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No data received"}), 400
+        
+        status = data.get("status")
+        org_id = data.get("org_id")
+        file_ids = data.get("file_ids", [])
+        deleted_embeddings = data.get("deleted_embeddings", 0)
+        success = data.get("success", False)
+        error_message = data.get("error")
+        
+        if not org_id or not file_ids:
+            print(f"⚠️ NodeRAG delete webhook missing org_id or file_ids: {data}")
+            return jsonify({"error": "Missing org_id or file_ids in webhook data"}), 400
+        
+        print(f"📨 NodeRAG delete webhook: status={status}, org_id={org_id}, files={len(file_ids)}, deleted={deleted_embeddings}")
+        
+        # Handle different deletion statuses
+        if status == "processing":
+            progress = data.get("progress", 0)
+            print(f"🗑️ NodeRAG deletion in progress: {progress}% for {len(file_ids)} files")
+            
+        elif status == "completed":
+            if success:
+                print(f"✅ NodeRAG deletion completed successfully: {deleted_embeddings} embeddings deleted for {len(file_ids)} files")
+                # Note: In a production system, you might want to update a database record or send notifications
+            else:
+                print(f"❌ NodeRAG deletion completed with errors: {error_message}")
+            
+        elif status == "failed":
+            print(f"❌ NodeRAG deletion failed: {error_message}")
+            
+        else:
+            print(f"⚠️ Unknown NodeRAG delete webhook status: {status}")
+        
+        return jsonify({
+            "message": "Delete webhook processed successfully",
+            "status": status,
+            "org_id": org_id,
+            "file_count": len(file_ids)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ NodeRAG delete webhook error: {e}")
         return jsonify({"error": str(e)}), 500
 
 def search_noderag_service(org_id, query, top_k=10, filters=None):
@@ -9023,134 +9301,149 @@ def generate_response_v2():
         knowledge_base_option = data.get("knowledgeBaseOption", "global")  # "global" or "specific"
         conversation_history = data.get("conversationHistory", "")
         max_results = data.get("maxResults", 5)
+        rag_version = data.get("ragversion", "v1")  # Default to v1 (NeonDB)
         
         if not query or not org_id:
             return jsonify({"error": "Query and orgId are required."}), 400
 
-        print(f"🤖 V2 Generate Response: '{query[:100]}...' for Org: {org_id}, Knowledge: {knowledge_base_option}")
+        print(f"🤖 V2 Generate Response: '{query[:100]}...' for Org: {org_id}, Knowledge: {knowledge_base_option}, ragversion: {rag_version}")
         
-        # Import modern retrieval and LLM systems
-        from retrieval_system import search_documents
-        from llm_integration import generate_rag_answer
-        
-        # Determine file filtering based on knowledge base option
-        file_ids = None  # Default: search all files
-        if knowledge_base_option == "specific" and project_id:
-            print(f"📁 Using project-specific knowledge for project: {project_id}")
-            # Note: This would require project-specific file mapping in NeonDB
-            # For now, we'll search all files and add project context
+        # Route based on ragversion
+        if rag_version == "v2":
+            # Use NodeRAG service for generation
+            result = call_noderag_generate_response(
+                query=query,
+                org_id=org_id,
+                project_id=project_id,
+                knowledge_base_option=knowledge_base_option,
+                conversation_history=conversation_history,
+                max_results=max_results
+            )
+            return jsonify(result["response"]), result["status_code"]
         else:
-            print("🌐 Using global knowledge base")
+            # Use existing NeonDB generation (v1)
+            # Import modern retrieval and LLM systems
+            from retrieval_system import search_documents
+            from llm_integration import generate_rag_answer
+            
+            # Determine file filtering based on knowledge base option
+            file_ids = None  # Default: search all files
+            if knowledge_base_option == "specific" and project_id:
+                print(f"📁 Using project-specific knowledge for project: {project_id}")
+                # Note: This would require project-specific file mapping in NeonDB
+                # For now, we'll search all files and add project context
+            else:
+                print("🌐 Using global knowledge base")
+            
+            # Search documents using modern V3 system
+            print("🎯 Searching documents with modern retrieval system...")
+            search_results = search_documents(
+                query=query,
+                org_id=org_id,
+                file_ids=file_ids,
+                top_k=max_results
+            )
         
-        # Search documents using modern V3 system
-        print("🎯 Searching documents with modern retrieval system...")
-        search_results = search_documents(
-            query=query,
-            org_id=org_id,
-            file_ids=file_ids,
-            top_k=max_results
-        )
-        
-        # Build context from search results
-        context_result = {
-            "context": "\n\n".join([result["text"][:500] for result in search_results[:3]]),  # Top 3 results, 500 chars each
-            "sources": list(set([result["file_id"] for result in search_results])),
-            "total_chunks": len(search_results),
-            "avg_similarity": sum([result["similarity_score"] for result in search_results]) / len(search_results) if search_results else 0,
-            "chunks_metadata": search_results
-        }
-        
-        if not search_results:
-            return jsonify({
+            # Build context from search results
+            context_result = {
+                "context": "\n\n".join([result["text"][:500] for result in search_results[:3]]),  # Top 3 results, 500 chars each
+                "sources": list(set([result["file_id"] for result in search_results])),
+                "total_chunks": len(search_results),
+                "avg_similarity": sum([result["similarity_score"] for result in search_results]) / len(search_results) if search_results else 0,
+                "chunks_metadata": search_results
+            }
+            
+            if not search_results:
+                return jsonify({
+                    "query": query,
+                    "project_id": project_id,
+                    "org_id": org_id,
+                    "knowledge_type": knowledge_base_option,
+                    "answer": "I couldn't find relevant information in the knowledge base to answer this question.",
+                    "source_files": [],
+                    "retrieved_chunks": 0,
+                    "search_results": []
+                }), 200
+            
+            # Generate LLM answer using retrieved context
+            print("🤖 Generating LLM answer...")
+            
+            # Prepare enhanced context with conversation history
+            enhanced_context = context_result["context"]
+            if conversation_history:
+                enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
+            
+            llm_result = generate_rag_answer(
+                query=query,
+                context=enhanced_context,
+                max_tokens=2048,
+                temperature=0.7
+            )
+            
+            if llm_result["success"]:
+                # Clean the LLM response
+                raw_answer = llm_result["answer"]
+                cleaned_answer = raw_answer
+                
+                # Clean up response formatting
+                if "assistant" in raw_answer and raw_answer.count("assistant") > 0:
+                    parts = raw_answer.split("assistant")
+                    if len(parts) > 1:
+                        cleaned_answer = parts[-1].strip()
+                
+                # Remove system/user prefixes
+                for prefix in ["system\n", "user\n", "Answer:\n", "Answer:", "\nassistant\n"]:
+                    if cleaned_answer.startswith(prefix):
+                        cleaned_answer = cleaned_answer[len(prefix):].strip()
+                
+                # Remove trailing artifacts
+                for suffix in ["<|im_end|>", "<|endoftext|>"]:
+                    if cleaned_answer.endswith(suffix):
+                        cleaned_answer = cleaned_answer[:-len(suffix)].strip()
+                
+                answer = cleaned_answer
+            else:
+                answer = f"I found {len(search_results)} relevant results, but couldn't generate a complete answer. Please check the search results below."
+            
+            # Collect source files
+            source_files = []
+            seen_files = set()
+            for result in search_results:
+                file_id = result["file_id"]
+                if file_id not in seen_files:
+                    source_files.append({
+                        "file_id": file_id,
+                        "filename": result.get("filename", "unknown"),
+                        "similarity_score": result["similarity_score"]
+                    })
+                    seen_files.add(file_id)
+            
+            # Return response in V2 format for compatibility
+            response = {
                 "query": query,
                 "project_id": project_id,
                 "org_id": org_id,
                 "knowledge_type": knowledge_base_option,
-                "answer": "I couldn't find relevant information in the knowledge base to answer this question.",
-                "source_files": [],
-                "retrieved_chunks": 0,
-                "search_results": []
-            }), 200
-        
-        # Generate LLM answer using retrieved context
-        print("🤖 Generating LLM answer...")
-        
-        # Prepare enhanced context with conversation history
-        enhanced_context = context_result["context"]
-        if conversation_history:
-            enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
-        
-        llm_result = generate_rag_answer(
-            query=query,
-            context=enhanced_context,
-            max_tokens=2048,
-            temperature=0.7
-        )
-        
-        if llm_result["success"]:
-            # Clean the LLM response
-            raw_answer = llm_result["answer"]
-            cleaned_answer = raw_answer
+                "answer": answer,
+                "source_files": source_files,
+                "retrieved_chunks": len(search_results),
+                "search_results": search_results,
+                "context_metadata": {
+                    "sources": context_result["sources"],
+                    "total_chunks": context_result["total_chunks"],
+                    "avg_similarity": context_result["avg_similarity"]
+                },
+                "llm_metadata": {
+                    "model": llm_result.get("model", "unknown"),
+                    "context_used": llm_result.get("context_used", False),
+                    "context_length": llm_result.get("context_length", 0)
+                } if llm_result["success"] else {},
+                "retrieval_method": "vector_similarity_v3",
+                "processing_version": "v2.1.0_modernized"
+            }
             
-            # Clean up response formatting
-            if "assistant" in raw_answer and raw_answer.count("assistant") > 0:
-                parts = raw_answer.split("assistant")
-                if len(parts) > 1:
-                    cleaned_answer = parts[-1].strip()
-            
-            # Remove system/user prefixes
-            for prefix in ["system\n", "user\n", "Answer:\n", "Answer:", "\nassistant\n"]:
-                if cleaned_answer.startswith(prefix):
-                    cleaned_answer = cleaned_answer[len(prefix):].strip()
-            
-            # Remove trailing artifacts
-            for suffix in ["<|im_end|>", "<|endoftext|>"]:
-                if cleaned_answer.endswith(suffix):
-                    cleaned_answer = cleaned_answer[:-len(suffix)].strip()
-            
-            answer = cleaned_answer
-        else:
-            answer = f"I found {len(search_results)} relevant results, but couldn't generate a complete answer. Please check the search results below."
-        
-        # Collect source files
-        source_files = []
-        seen_files = set()
-        for result in search_results:
-            file_id = result["file_id"]
-            if file_id not in seen_files:
-                source_files.append({
-                    "file_id": file_id,
-                    "filename": result.get("filename", "unknown"),
-                    "similarity_score": result["similarity_score"]
-                })
-                seen_files.add(file_id)
-        
-        # Return response in V2 format for compatibility
-        response = {
-            "query": query,
-            "project_id": project_id,
-            "org_id": org_id,
-            "knowledge_type": knowledge_base_option,
-            "answer": answer,
-            "source_files": source_files,
-            "retrieved_chunks": len(search_results),
-            "search_results": search_results,
-            "context_metadata": {
-                "sources": context_result["sources"],
-                "total_chunks": context_result["total_chunks"],
-                "avg_similarity": context_result["avg_similarity"]
-            },
-            "llm_metadata": {
-                "model": llm_result.get("model", "unknown"),
-                "context_used": llm_result.get("context_used", False),
-                "context_length": llm_result.get("context_length", 0)
-            } if llm_result["success"] else {},
-            "retrieval_method": "vector_similarity_v3",
-            "processing_version": "v2.1.0_modernized"
-        }
-        
-        print(f"✅ V2 Generate Response completed: {len(search_results)} results, answer length: {len(answer)}")
-        return jsonify(response), 200
+            print(f"✅ V2 Generate Response completed: {len(search_results)} results, answer length: {len(answer)}")
+            return jsonify(response), 200
 
     except Exception as e:
         error_msg = str(e)
@@ -9182,6 +9475,7 @@ def generate_questionnaire_response():
         knowledge_base_option = data.get('knowledgeBaseOption', 'global')
         org_id = data.get('orgId')
         project_id = data.get('projectId')
+        rag_version = data.get('ragversion', 'v1')  # Default to v1 (NeonDB)
         rerank = data.get('rerank', True)  # Enable reranking by default
         enable_hybrid_search = data.get('hybridSearch', True)  # Enable hybrid search by default
         dense_weight = data.get('denseWeight', 0.7)  # Weight for semantic search
@@ -9190,13 +9484,27 @@ def generate_questionnaire_response():
         max_query_variations = data.get('maxQueryVariations', 2)  # Number of query variations
         context_type = data.get('contextType', "compliance")  # Context for query expansion (compliance for questionnaires)
         
-        print(f"🎯 Questionnaire Generate: {question_text} ({response_type})")
+        print(f"🎯 Questionnaire Generate: {question_text} ({response_type}), ragversion: {rag_version}")
         
         if not all([questionnaire_id, question_text, org_id, project_id]):
             return jsonify({
                 'success': False,
                 'error': 'Missing required fields'
             }), 400
+        
+        # Route based on ragversion
+        if rag_version == "v2":
+            # Use NodeRAG service for questionnaire generation
+            result = call_noderag_questionnaire_response(
+                questionnaire_id=questionnaire_id,
+                question_text=question_text,
+                response_type=response_type,
+                choices=choices,
+                org_id=org_id,
+                project_id=project_id,
+                knowledge_base_option=knowledge_base_option
+            )
+            return jsonify(result["response"]), result["status_code"]
         
         # Check if ChatGPT LLM integration is available
         try:
