@@ -62,12 +62,46 @@ def parse_document_with_ssl_fix(file_path: str, api_key: Optional[str] = None, *
     try:
         parser = get_llamaparse_parser(api_key=api_key, **kwargs)
         print(f"📊 Parsing {file_path} with LlamaParse (SSL fix applied)...")
-        
+
         documents = parser.load_data(file_path)
         print(f"✅ Successfully parsed {len(documents)} document(s)")
-        
+
         return documents
-        
+
+    except Exception as e:
+        print(f"❌ LlamaParse failed: {e}")
+        raise
+
+def parse_document_with_metadata(file_path: str, api_key: Optional[str] = None, **kwargs):
+    """Parse document with SSL fixes and return both documents and metadata (including page count)"""
+    try:
+        parser = get_llamaparse_parser(api_key=api_key, **kwargs)
+        print(f"📊 Parsing {file_path} with LlamaParse (SSL fix applied)...")
+
+        # Get JSON result to access job_metadata
+        try:
+            json_objs = parser.get_json_result(file_path)
+
+            # Extract page count from job_metadata
+            page_count = None
+            if json_objs and len(json_objs) > 0:
+                job_metadata = json_objs[0].get("job_metadata", {})
+                page_count = job_metadata.get("job_pages", None)
+                print(f"📄 Job metadata - Pages: {page_count}, Cache hit: {job_metadata.get('job_is_cache_hit', False)}")
+        except Exception as meta_error:
+            print(f"⚠️ Could not extract job_metadata: {meta_error}")
+            page_count = None
+
+        # Get documents for processing
+        documents = parser.load_data(file_path)
+        print(f"✅ Successfully parsed {len(documents)} document(s)")
+
+        return {
+            "documents": documents,
+            "page_count": page_count,
+            "document_count": len(documents)
+        }
+
     except Exception as e:
         print(f"❌ LlamaParse failed: {e}")
         raise

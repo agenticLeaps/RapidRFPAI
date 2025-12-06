@@ -7376,18 +7376,18 @@ def download_from_gcs(gcs_path):
         print(f"❌ Error downloading from GCS: {e}")
         return None
 
-def call_noderag_service(org_id, file_id, user_id, chunks):
+def call_noderag_service(org_id, file_id, user_id, chunks, page_count=None):
     """Send chunks to NodeRAG service for processing via API"""
     try:
         print(f"🔗 Sending {len(chunks)} chunks to NodeRAG service for fileId={file_id}")
-        
+
         # Get NodeRAG service URL from environment
         noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
-        
+
         # Prepare callback URL for status updates
         main_server_url = os.getenv("MAIN_SERVER_URL", "http://localhost:5000")
         callback_url = f"{main_server_url}/api/webhook/noderag"
-        
+
         # Prepare API payload
         payload = {
             "org_id": org_id,
@@ -7396,6 +7396,11 @@ def call_noderag_service(org_id, file_id, user_id, chunks):
             "chunks": chunks,
             "callback_url": callback_url
         }
+
+        # Add page_count if available
+        if page_count is not None:
+            payload["page_count"] = page_count
+            print(f"📊 Including page count in NodeRAG request: {page_count} pages")
         
         # Make API call to NodeRAG service
         response = requests.post(
@@ -7666,31 +7671,38 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
     """Extract chunks using existing v1 processing pipeline"""
     try:
         from direct_neondb_storage import process_file_direct_storage
-        
+
         print(f"📄 Extracting chunks using v1 pipeline for NodeRAG...")
-        
+
         # Temporarily modify the direct storage function to return chunks
         # We'll extract the chunking logic
         file_ext = filename.split('.')[-1].lower()
         documents = []
-        
+        page_count = None  # Initialize page count
+
         # Use the same logic as in direct_neondb_storage.py
         llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
-        
+
         if file_ext in llamaparse_supported:
             try:
-                from llamaparse_ssl_fix import parse_document_with_ssl_fix
-                
+                from llamaparse_ssl_fix import parse_document_with_metadata
+
                 print(f"📊 Parsing {filename} with LlamaParse for NodeRAG...")
-                documents = parse_document_with_ssl_fix(
+                parse_result = parse_document_with_metadata(
                     file_path=file_path,
                     api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
                     result_type="markdown",
                     verbose=True,
                     language="en"
                 )
+
+                documents = parse_result.get("documents", [])
+                page_count = parse_result.get("page_count")
+
                 print(f"✅ LlamaParse loaded {len(documents)} document(s)")
-                
+                if page_count:
+                    print(f"📊 Total pages parsed: {page_count}")
+
             except Exception as e:
                 print(f"⚠️ LlamaParse failed: {str(e)}")
                 documents = []
@@ -7743,9 +7755,9 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
                         'total_chunks': len(nodes)
                     }
                 })
-            
-            return chunks
-            
+
+            return {"chunks": chunks, "page_count": page_count}
+
         except Exception as e:
             print(f"⚠️ Chunking failed: {str(e)}")
             # Simple fallback chunking
@@ -7791,10 +7803,10 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
                         'chunk_index': len(chunks)
                     }
                 })
-            
+
             print(f"✂️ Created {len(chunks)} chunks (fallback method)")
-            return chunks
-            
+            return {"chunks": chunks, "page_count": page_count}
+
     except Exception as e:
         print(f"❌ Chunk extraction error: {e}")
         return None
@@ -7899,21 +7911,30 @@ def upload_file_v3():
         
         def process_file_v3_async():
             try:
+                page_count = None
+                chunks_stored = None
+
                 if rag_version == "v2":
                     print(f"🚀 V3 Starting NodeRAG v2 processing...")
-                    
+
                     # Extract chunks using v1 pipeline
-                    chunks = get_chunks_from_v1_processing(save_path, file_id, org_id, user_id, filename)
-                    if not chunks:
+                    chunk_result = get_chunks_from_v1_processing(save_path, file_id, org_id, user_id, filename)
+                    if not chunk_result:
                         raise Exception("Failed to extract chunks from file")
-                    
-                    # Send to NodeRAG service
-                    result = call_noderag_service(org_id, file_id, user_id, chunks)
-                    
+
+                    chunks = chunk_result.get("chunks")
+                    page_count = chunk_result.get("page_count")
+
+                    if not chunks:
+                        raise Exception("No chunks extracted from file")
+
+                    # Send to NodeRAG service with page count
+                    result = call_noderag_service(org_id, file_id, user_id, chunks, page_count=page_count)
+
                 else:
                     print(f"🚀 V3 Starting direct NeonDB processing (v1)...")
                     from direct_neondb_storage import process_file_direct_storage
-                    
+
                     result = process_file_direct_storage(
                         file_path=save_path,
                         file_id=file_id,
@@ -7921,19 +7942,28 @@ def upload_file_v3():
                         user_id=user_id,
                         filename=filename
                     )
-                
+
+                    # Extract page count from result
+                    page_count = result.get("page_count")
+                    chunks_stored = result.get("chunks_stored")
+
                 print(f"✅ V3 Direct storage result: {result}")
-                
+
                 if result.get("success") and rag_version != "v2":
-                    # Success - notify completion
-                    notify_backend_status(file_id, user_id, 'completed', True, source="flask_ai_v3")
-                    print(f"✅ V3 Processing complete: {result.get('chunks_stored', 0)} chunks stored")
+                    # Success - notify completion with page count and chunks stored
+                    notify_backend_status(
+                        file_id, user_id, 'completed', True,
+                        source="flask_ai_v3",
+                        page_count=page_count,
+                        chunks_stored=chunks_stored
+                    )
+                    print(f"✅ V3 Processing complete: {chunks_stored} chunks stored, {page_count} pages parsed")
                 elif not result.get("success"):
                     # Direct storage failed
                     error_msg = result.get("error", "Unknown storage error")
                     print(f"❌ V3 Direct storage failed: {error_msg}")
-                    notify_backend_status(file_id, user_id, 'failed', False, f"Direct storage failed: {error_msg}")
-                    
+                    notify_backend_status(file_id, user_id, 'failed', False, error_msg)
+
             except Exception as e:
                 print(f"❌ V3 Background processing error: {str(e)}")
                 notify_backend_status(file_id, user_id, 'failed', False, str(e))
@@ -8046,11 +8076,14 @@ def noderag_webhook():
             results = webhook_data.get("results", {})
             chunks_processed = results.get("chunks_processed", 0)
             embeddings_stored = results.get("embeddings_stored", 0)
-            
+            page_count = results.get("page_count")  # Extract page_count if provided by NodeRAG
+
             notify_backend_status(
                 file_id, user_id, 'completed', True,
                 f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
-                source="noderag_v2"
+                source="noderag_v2",
+                page_count=page_count,
+                chunks_stored=embeddings_stored
             )
             print(f"✅ NodeRAG processing completed for file_id={file_id}")
             
@@ -8412,12 +8445,12 @@ def generate_answer_v2():
         print(f"❌ V2 Answer error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai"):
+def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai", page_count=None, chunks_stored=None):
     """Notify Node.js backend of file processing status via webhook"""
     try:
         backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
         webhook_url = f"{backend_api_url}/api/v2/files/webhook/ai-status"
-        
+
         payload = {
             "fileId": file_id,
             "userId": user_id,
@@ -8426,22 +8459,29 @@ def notify_backend_status(file_id, user_id, status, embedding_complete, error=No
             "timestamp": datetime.now().isoformat(),
             "source": source
         }
-        
+
         if error:
             payload["error"] = error
-            
+
+        if page_count is not None:
+            payload["pageCount"] = page_count
+            print(f"📊 Adding page count to notification: {page_count} pages")
+
+        if chunks_stored is not None:
+            payload["chunksStored"] = chunks_stored
+
         response = requests.post(
             webhook_url,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=10
         )
-        
+
         if response.status_code == 200:
             print(f"✅ V2 Status webhook sent: {file_id} → {status}")
         else:
             print(f"⚠️ V2 Webhook failed: {response.status_code}")
-            
+
     except Exception as e:
         print(f"❌ V2 Webhook error: {str(e)}")
 
@@ -10959,13 +10999,26 @@ def generate_noderag_response(query, org_id, conversation_history="", data=None)
         
         if response.status_code == 200:
             result = response.json()
-            
+
+            # Extract token usage from NodeRAG response (v2 mode)
+            usage = result.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", 0)
+
+            print(f"📊 NodeRAG Token usage - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+
             # Format response in chat format
             chat_response = {
                 "response": result.get("response", ""),
                 "query": query,
                 "orgId": org_id,
                 "source": "noderag_v2",
+                "token_usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens
+                },
                 "metadata": {
                     "rag_version": "v2",
                     "processing_type": "noderag",
@@ -10979,7 +11032,7 @@ def generate_noderag_response(query, org_id, conversation_history="", data=None)
                     "retrieval_metadata": result.get("retrieval_metadata", {})
                 }
             }
-            
+
             print(f"✅ NodeRAG response generated successfully with {len(result.get('sources', []))} sources")
             return jsonify(chat_response)
             
@@ -11098,26 +11151,34 @@ def chat_v3():
             # Clean the LLM response to extract only the answer
             raw_answer = llm_result["answer"]
             cleaned_answer = raw_answer
-            
+
             # Try to extract just the assistant's answer from the full response
             if "assistant" in raw_answer and raw_answer.count("assistant") > 0:
                 # Find the last occurrence of 'assistant' and extract what comes after
                 parts = raw_answer.split("assistant")
                 if len(parts) > 1:
                     cleaned_answer = parts[-1].strip()
-            
+
             # Remove any remaining system/user prefixes and common artifacts
             for prefix in ["system\n", "user\n", "Answer:\n", "Answer:", "\nassistant\n"]:
                 if cleaned_answer.startswith(prefix):
                     cleaned_answer = cleaned_answer[len(prefix):].strip()
-            
+
             # Remove trailing artifacts
             for suffix in ["<|im_end|>", "<|endoftext|>"]:
                 if cleaned_answer.endswith(suffix):
                     cleaned_answer = cleaned_answer[:-len(suffix)].strip()
-            
+
             print(f"🧹 Cleaned answer: {cleaned_answer[:100]}...")
-            
+
+            # Extract token usage from LLM result (v1 mode)
+            usage = llm_result.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", 0)
+
+            print(f"📊 Token usage - Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens}")
+
             response = {
                 "query": query,
                 "orgId": org_id,
@@ -11135,6 +11196,11 @@ def chat_v3():
                     "model": llm_result["model"],
                     "context_used": llm_result["context_used"],
                     "context_length": llm_result["context_length"]
+                },
+                "token_usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens
                 },
                 "retrieval_method": "vector_similarity",
                 "embedding_model": "custom_hf_endpoint",

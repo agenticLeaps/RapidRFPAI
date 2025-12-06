@@ -346,27 +346,35 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
     # Use LlamaParse for complex file types, fallback to LlamaIndex for simple ones
     llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
     
+    page_count = None  # Initialize page count variable
+
     if file_ext in llamaparse_supported:
         print(f"🚀 Using LlamaParse for {file_ext.upper()} file")
         try:
-            from llamaparse_ssl_fix import parse_document_with_ssl_fix
-            
-            # Parse the document
+            from llamaparse_ssl_fix import parse_document_with_metadata
+
+            # Parse the document with metadata
             print(f"📊 Parsing {filename} with LlamaParse...")
-            print(f"🔄 About to call parser.load_data({file_path})")
-            documents = parse_document_with_ssl_fix(
+            print(f"🔄 About to call parser with metadata extraction")
+            parse_result = parse_document_with_metadata(
                 file_path=file_path,
                 api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
                 result_type="markdown",
                 verbose=True,
                 language="en"
             )
-            print(f"✅ parser.load_data completed successfully")
+
+            documents = parse_result.get("documents", [])
+            page_count = parse_result.get("page_count")
+
+            print(f"✅ parser completed successfully")
             print(f"📄 LlamaParse loaded {len(documents)} document(s)")
-            
+            if page_count:
+                print(f"📊 Total pages parsed: {page_count}")
+
             if documents:
                 print(f"📝 First document preview: {documents[0].text[:200]}...")
-                
+
         except Exception as e:
             print(f"⚠️ LlamaParse failed: {str(e)}")
             print(f"🔄 Falling back to LlamaIndex readers...")
@@ -479,4 +487,11 @@ def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_
     
     # Store directly
     storage = DirectNeonDBStorage()
-    return asyncio.run(storage.store_embeddings_directly(chunks, file_id, org_id, user_id, filename))
+    result = asyncio.run(storage.store_embeddings_directly(chunks, file_id, org_id, user_id, filename))
+
+    # Add page count to result
+    if page_count is not None:
+        result["page_count"] = page_count
+        print(f"📊 Adding page count to result: {page_count} pages")
+
+    return result
