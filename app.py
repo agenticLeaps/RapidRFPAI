@@ -16,6 +16,24 @@ from threading import Thread, Lock
 import asyncio
 from waitress import serve
 from openai import OpenAI
+
+# In-memory cache for storing page counts during NodeRAG processing
+# Format: {file_id: {"page_count": int, "chunks_count": int, "timestamp": float}}
+noderag_metadata_cache = {}
+noderag_cache_lock = Lock()
+
+def cleanup_stale_noderag_cache():
+    """Remove cache entries older than 1 hour to prevent memory leaks"""
+    with noderag_cache_lock:
+        current_time = time.time()
+        stale_keys = [
+            file_id for file_id, data in noderag_metadata_cache.items()
+            if current_time - data.get("timestamp", 0) > 3600  # 1 hour
+        ]
+        for file_id in stale_keys:
+            del noderag_metadata_cache[file_id]
+        if stale_keys:
+            print(f"🗑️ Cleaned up {len(stale_keys)} stale cache entries")
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import zipfile
 import io
@@ -7707,16 +7725,33 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
                 print(f"⚠️ LlamaParse failed: {str(e)}")
                 documents = []
         
-        # Fallback to simple text reading if needed
+        # Fallback to LlamaIndex readers if LlamaParse failed
         if not documents:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                from llama_index.readers.file import UnstructuredReader
                 from llama_index.core import Document
-                documents = [Document(text=content)]
-            except Exception as e:
-                print(f"❌ Text extraction failed: {e}")
-                return None
+
+                print(f"📖 Trying LlamaIndex UnstructuredReader as fallback...")
+                reader = UnstructuredReader()
+                documents = reader.load_data(file=file_path)
+                print(f"✅ Fallback: Loaded {len(documents)} document(s)")
+
+            except Exception as fallback_error:
+                print(f"⚠️ LlamaIndex fallback also failed: {fallback_error}")
+                # Last resort - try simple text reading for text files only
+                if file_ext not in llamaparse_supported:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        from llama_index.core import Document
+                        documents = [Document(text=content)]
+                        print(f"✅ Simple text reading succeeded")
+                    except Exception as text_error:
+                        print(f"❌ All extraction methods failed: {text_error}")
+                        return None
+                else:
+                    print(f"❌ Cannot extract content from {file_ext} file - all methods failed")
+                    return None
         
         # Add metadata to documents
         for doc in documents:
@@ -7928,6 +7963,15 @@ def upload_file_v3():
                     if not chunks:
                         raise Exception("No chunks extracted from file")
 
+                    # Store metadata in cache for later retrieval when NodeRAG webhook arrives
+                    with noderag_cache_lock:
+                        noderag_metadata_cache[file_id] = {
+                            "page_count": page_count,
+                            "chunks_count": len(chunks),
+                            "timestamp": time.time()
+                        }
+                    print(f"📦 Cached metadata for file {file_id}: {page_count} pages, {len(chunks)} chunks")
+
                     # Send to NodeRAG service with page count
                     result = call_noderag_service(org_id, file_id, user_id, chunks, page_count=page_count)
 
@@ -8037,7 +8081,10 @@ def noderag_webhook():
             return jsonify({"error": "Missing file_id in webhook data"}), 400
         
         print(f"📨 NodeRAG webhook received: status={status}, file_id={file_id}")
-        
+
+        # Cleanup stale cache entries periodically
+        cleanup_stale_noderag_cache()
+
         # Map NodeRAG statuses to backend notifications
         if status == "processing":
             phase = webhook_data.get("phase", "initialization")
@@ -8078,6 +8125,16 @@ def noderag_webhook():
             embeddings_stored = results.get("embeddings_stored", 0)
             page_count = results.get("page_count")  # Extract page_count if provided by NodeRAG
 
+            # Retrieve cached metadata if page_count not in webhook
+            if page_count is None:
+                with noderag_cache_lock:
+                    cached_data = noderag_metadata_cache.get(file_id)
+                    if cached_data:
+                        page_count = cached_data.get("page_count")
+                        print(f"📦 Retrieved cached page_count for {file_id}: {page_count} pages")
+                        # Clean up cache entry
+                        del noderag_metadata_cache[file_id]
+
             notify_backend_status(
                 file_id, user_id, 'completed', True,
                 f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
@@ -8089,6 +8146,13 @@ def noderag_webhook():
             
         elif status == "failed":
             error_msg = webhook_data.get("error", "Unknown NodeRAG error")
+
+            # Clean up cache on failure
+            with noderag_cache_lock:
+                if file_id in noderag_metadata_cache:
+                    del noderag_metadata_cache[file_id]
+                    print(f"🗑️ Cleaned up cached metadata for failed file {file_id}")
+
             notify_backend_status(
                 file_id, user_id, 'failed', False,
                 f"NodeRAG failed: {error_msg}",
