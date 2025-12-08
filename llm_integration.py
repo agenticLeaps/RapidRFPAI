@@ -14,36 +14,113 @@ class ChatGPTLLMClient:
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not found in environment")
-        
+
         self.base_url = "https://api.openai.com/v1"
         self.model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+
+    def _parse_conversation_history(self, conversation_history: str) -> list:
+        """
+        Parse conversation history string into OpenAI message format
+
+        Expected formats:
+        1. "user: message\nassistant: response\nuser: next message\n..."
+        2. "User: message\nAssistant: response\n..."
+        3. JSON string: '[{"role": "user", "content": "..."}, ...]'
+
+        Returns:
+            List of message dictionaries with 'role' and 'content' keys
+        """
+        messages = []
+
+        if not conversation_history or not conversation_history.strip():
+            return messages
+
+        # Try to parse as JSON first (most structured format)
+        try:
+            import json
+            parsed = json.loads(conversation_history)
+            if isinstance(parsed, list):
+                for msg in parsed:
+                    if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                        if msg["role"] in ["user", "assistant"]:
+                            messages.append({"role": msg["role"], "content": msg["content"]})
+                return messages
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Parse as text format: "user: ...\nassistant: ...\n"
+        lines = conversation_history.strip().split('\n')
+        current_role = None
+        current_content = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if line starts with a role indicator
+            lower_line = line.lower()
+            if lower_line.startswith('user:') or lower_line.startswith('user :'):
+                # Save previous message if exists
+                if current_role and current_content:
+                    messages.append({
+                        "role": current_role,
+                        "content": '\n'.join(current_content).strip()
+                    })
+                current_role = "user"
+                current_content = [line.split(':', 1)[1].strip() if ':' in line else '']
+            elif lower_line.startswith('assistant:') or lower_line.startswith('assistant :'):
+                # Save previous message if exists
+                if current_role and current_content:
+                    messages.append({
+                        "role": current_role,
+                        "content": '\n'.join(current_content).strip()
+                    })
+                current_role = "assistant"
+                current_content = [line.split(':', 1)[1].strip() if ':' in line else '']
+            else:
+                # Continuation of current message
+                if current_role:
+                    current_content.append(line)
+
+        # Don't forget the last message
+        if current_role and current_content:
+            messages.append({
+                "role": current_role,
+                "content": '\n'.join(current_content).strip()
+            })
+
+        return messages
     
     def generate_answer(
-        self, 
-        query: str, 
-        context: str = "", 
+        self,
+        query: str,
+        context: str = "",
+        conversation_history: str = "",
         max_tokens: int = 1024,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
         """
         Generate answer using ChatGPT with optional context (RAG)
-        
+
         Args:
             query: User question
             context: Retrieved context from documents
+            conversation_history: Previous conversation in format "user: ...\nassistant: ...\n"
             max_tokens: Maximum response tokens
             temperature: Sampling temperature
-            
+
         Returns:
             Dictionary with answer and metadata
         """
         print(f"🤖 Generating answer for: '{query[:100]}...'")
         print(f"📝 Context length: {len(context)} chars")
+        print(f"💬 Conversation history length: {len(conversation_history)} chars")
         
         try:
             # Prepare messages for ChatGPT
             messages = []
-            
+
             if context:
                 # Fetch prompt from API with fallback
                 try:
@@ -100,12 +177,19 @@ If the relevant text does not contain enough information to answer the question,
 
 Context:
 {context}"""
-                
+
                 messages.append({"role": "system", "content": system_message})
             else:
                 # Simple mode without context
                 messages.append({"role": "system", "content": "You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services. Provide clear, concise, and professional responses."})
-            
+
+            # Parse and add conversation history as proper message pairs
+            if conversation_history:
+                history_messages = self._parse_conversation_history(conversation_history)
+                messages.extend(history_messages)
+                print(f"📝 Added {len(history_messages)} messages from conversation history")
+
+            # Add current query
             messages.append({"role": "user", "content": query})
             
             # Call OpenAI API
@@ -290,10 +374,10 @@ Context:
             }
 
 # Convenience functions
-def generate_rag_answer(query: str, context: str = "", **kwargs) -> Dict[str, Any]:
+def generate_rag_answer(query: str, context: str = "", conversation_history: str = "", **kwargs) -> Dict[str, Any]:
     """Generate RAG answer using ChatGPT"""
     client = ChatGPTLLMClient()
-    return client.generate_answer(query, context, **kwargs)
+    return client.generate_answer(query, context, conversation_history, **kwargs)
 
 def generate_simple_response(prompt: str, **kwargs) -> Dict[str, Any]:
     """Generate simple response using ChatGPT"""

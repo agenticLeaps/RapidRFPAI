@@ -9471,15 +9471,11 @@ def generate_response_v2():
             
             # Generate LLM answer using retrieved context
             print("🤖 Generating LLM answer...")
-            
-            # Prepare enhanced context with conversation history
-            enhanced_context = context_result["context"]
-            if conversation_history:
-                enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
-            
+
             llm_result = generate_rag_answer(
                 query=query,
-                context=enhanced_context,
+                context=context_result["context"],
+                conversation_history=conversation_history,
                 max_tokens=2048,
                 temperature=0.7
             )
@@ -11198,15 +11194,11 @@ def chat_v3():
         
         # Generate LLM answer using retrieved context
         print("🤖 Generating LLM answer...")
-        
-        # Prepare enhanced context with conversation history
-        enhanced_context = context_result["context"]
-        if conversation_history:
-            enhanced_context = f"Previous conversation:\n{conversation_history}\n\nRelevant context:\n{context_result['context']}"
-        
+
         llm_result = generate_rag_answer(
             query=query,
-            context=enhanced_context,
+            context=context_result["context"],
+            conversation_history=conversation_history,
             max_tokens=2048,
             temperature=0.7
         )
