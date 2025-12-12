@@ -7863,7 +7863,15 @@ def upload_file_v3():
         user_id = request.form.get("userId") or request.args.get("userId")
         rag_version = request.form.get("ragversion") or request.args.get("ragversion", "v1")
         from_gcs = request.form.get('fromGCS', 'false').lower() == 'true'
-        
+
+        # Extract auth token from form, args, or headers
+        auth_token = request.form.get("authToken") or request.args.get("authToken")
+        if not auth_token and 'Authorization' in request.headers:
+            auth_token = request.headers['Authorization']
+            # Remove 'Bearer ' prefix if present
+            if auth_token.startswith('Bearer '):
+                auth_token = auth_token[7:]
+
         print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, ragversion={rag_version}, fromGCS={from_gcs}")
         
         if not org_id or not file_id or not user_id:
@@ -7934,10 +7942,10 @@ def upload_file_v3():
         print(f"📋 V3 Processing file type: {file_ext} (direct LlamaIndex processing)")
 
         # Notify backend: processing started
-        notify_backend_status(file_id, user_id, 'processing', False, source="flask_ai_v3")
-        
+        notify_backend_status(file_id, user_id, 'processing', False, source="flask_ai_v3", auth_token=auth_token)
+
         # Notify backend: embedding phase started
-        notify_backend_status(file_id, user_id, 'embedding', False, source="flask_ai_v3")
+        notify_backend_status(file_id, user_id, 'embedding', False, source="flask_ai_v3", auth_token=auth_token)
         
         # Start LlamaIndex processing in background
         print(f"🚀 V3 Starting LlamaIndex processing in background...")
@@ -7968,7 +7976,8 @@ def upload_file_v3():
                         noderag_metadata_cache[file_id] = {
                             "page_count": page_count,
                             "chunks_count": len(chunks),
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
+                            "auth_token": auth_token
                         }
                     print(f"📦 Cached metadata for file {file_id}: {page_count} pages, {len(chunks)} chunks")
 
@@ -7999,18 +8008,19 @@ def upload_file_v3():
                         file_id, user_id, 'completed', True,
                         source="flask_ai_v3",
                         page_count=page_count,
-                        chunks_stored=chunks_stored
+                        chunks_stored=chunks_stored,
+                        auth_token=auth_token
                     )
                     print(f"✅ V3 Processing complete: {chunks_stored} chunks stored, {page_count} pages parsed")
                 elif not result.get("success"):
                     # Direct storage failed
                     error_msg = result.get("error", "Unknown storage error")
                     print(f"❌ V3 Direct storage failed: {error_msg}")
-                    notify_backend_status(file_id, user_id, 'failed', False, error_msg)
+                    notify_backend_status(file_id, user_id, 'failed', False, error_msg, auth_token=auth_token)
 
             except Exception as e:
                 print(f"❌ V3 Background processing error: {str(e)}")
-                notify_backend_status(file_id, user_id, 'failed', False, str(e))
+                notify_backend_status(file_id, user_id, 'failed', False, str(e), auth_token=auth_token)
             finally:
                 # Cleanup files
                 if save_path and os.path.exists(save_path):
@@ -8124,6 +8134,7 @@ def noderag_webhook():
             chunks_processed = results.get("chunks_processed", 0)
             embeddings_stored = results.get("embeddings_stored", 0)
             page_count = results.get("page_count")  # Extract page_count if provided by NodeRAG
+            auth_token = None
 
             # Retrieve cached metadata if page_count not in webhook
             if page_count is None:
@@ -8131,7 +8142,16 @@ def noderag_webhook():
                     cached_data = noderag_metadata_cache.get(file_id)
                     if cached_data:
                         page_count = cached_data.get("page_count")
+                        auth_token = cached_data.get("auth_token")
                         print(f"📦 Retrieved cached page_count for {file_id}: {page_count} pages")
+                        # Clean up cache entry
+                        del noderag_metadata_cache[file_id]
+            else:
+                # If page_count came from webhook, still try to get auth_token from cache
+                with noderag_cache_lock:
+                    cached_data = noderag_metadata_cache.get(file_id)
+                    if cached_data:
+                        auth_token = cached_data.get("auth_token")
                         # Clean up cache entry
                         del noderag_metadata_cache[file_id]
 
@@ -8140,7 +8160,8 @@ def noderag_webhook():
                 f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
                 source="noderag_v2",
                 page_count=page_count,
-                chunks_stored=embeddings_stored
+                chunks_stored=embeddings_stored,
+                auth_token=auth_token
             )
             print(f"✅ NodeRAG processing completed for file_id={file_id}")
             
@@ -8509,7 +8530,7 @@ def generate_answer_v2():
         print(f"❌ V2 Answer error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai", page_count=None, chunks_stored=None):
+def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai", page_count=None, chunks_stored=None, auth_token=None):
     """Notify Node.js backend of file processing status via webhook"""
     try:
         backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8080")
@@ -8530,6 +8551,33 @@ def notify_backend_status(file_id, user_id, status, embedding_complete, error=No
         if page_count is not None:
             payload["pageCount"] = page_count
             print(f"📊 Adding page count to notification: {page_count} pages")
+
+            # Update page count via API if auth token is available
+            if auth_token and page_count > 0:
+                try:
+                    update_page_count_url = f"{backend_api_url}/api/usage/update-page-count"
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {auth_token}"
+                    }
+                    page_count_payload = {"pageCount": page_count}
+
+                    print(f"📊 Updating page count via API: {page_count} pages")
+                    page_count_response = requests.put(
+                        update_page_count_url,
+                        json=page_count_payload,
+                        headers=headers,
+                        timeout=10
+                    )
+
+                    if page_count_response.status_code == 200:
+                        response_data = page_count_response.json()
+                        print(f"✅ Page count updated successfully: {response_data}")
+                    else:
+                        print(f"⚠️ Page count update failed: {page_count_response.status_code} - {page_count_response.text}")
+
+                except Exception as pc_error:
+                    print(f"❌ Page count update error: {str(pc_error)}")
 
         if chunks_stored is not None:
             payload["chunksStored"] = chunks_stored
