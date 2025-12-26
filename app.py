@@ -75,8 +75,17 @@ keep_alive_running = False
 
 # Flask Setup
 app = Flask(__name__)
-CORS(app, origins="*", methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"], 
-     allow_headers=["Content-Type", "Authorization"])
+CORS(app, origins=[
+    "https://app.rapidrfp.ai",
+    "https://qa.rapidrfp.ai",
+    "https://backendprod-657352464140.us-central1.run.app",
+    "https://carebackend-657352464140.us-central1.run.app",
+    "http://localhost:3000",
+    "http://localhost:5173"
+],
+     methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"],
+     allow_headers=["Content-Type", "Authorization"],
+     supports_credentials=True)
 
 # Global progress tracking with thread safety
 upload_progress = {}
