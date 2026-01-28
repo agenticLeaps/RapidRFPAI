@@ -11408,6 +11408,38 @@ def search_v3():
         return jsonify({"error": f"Search failed: {str(e)}"}), 500
 
 
+@app.route("/api/v3/shred-documents", methods=["POST", "OPTIONS"])
+def shred_documents_v3():
+    """V3 Document Shredding endpoint - Extract metadata and submission requirements from RFP documents"""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        # Import the document shredder module
+        from document_shredder import shred_documents_endpoint_handler
+
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        print(f"📄 V3 Document Shredding: Processing {len(data.get('files', []))} files")
+
+        # Call the shredding handler
+        result, status_code = shred_documents_endpoint_handler(data)
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        print(f"❌ V3 Document Shredding error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Document shredding failed: {str(e)}"
+        }), 500
+
+
 # Keep-alive service for Render server
 def keep_alive_service():
     """Background service that pings the server to keep it alive"""
