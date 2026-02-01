@@ -122,7 +122,7 @@ def prepare_gemini_prompt() -> str:
         Formatted prompt string
     """
 
-    prompt = """You are a specialized RFP Analyst. Your task is to extract structured metadata, pursuit details, production details, and submission requirements from the provided RFP documents to initialize a project workspace.
+    prompt = """You are a specialized RFP Analyst. Your task is to extract structured metadata, pursuit details, production details, submission requirements, and a detailed compliance matrix from the provided RFP documents to initialize a project workspace.
 
 INSTRUCTIONS:
 
@@ -155,26 +155,43 @@ INSTRUCTIONS:
    - Attachments (e.g., "Work Samples", "References", "Resumes", "Past Performance")
    - Information to provide (e.g., "Project Timeline", "Pricing Structure", "Methodology")
 
-5. **De-duplication**: If a requirement appears in multiple files/sections, create ONE entry with multiple mentions in the mentions array
+5. **Compliance Matrix Extraction**: For EVERY specific mandate or requirement statement, populate the compliance_matrix array:
+   - Look for "shall", "must", "will", "required to", "contractor will", "vendor shall" statements
+   - Extract the EXACT text of each requirement
+   - Identify the source section reference (e.g., "L.4.2.1", "Section 3.2", "Paragraph 5.1.3")
+   - Note the page number where found
+   - Map each requirement to ONE of these categories:
+     * CERTIFICATION - Requires certifications, licenses, or accreditations
+     * EXPERIENCE - Past performance, years of experience, similar projects
+     * PERSONNEL - Staffing requirements, key personnel, qualifications
+     * FORMAT - Document format, page limits, font requirements
+     * SUBMISSION - Submission process, deadlines, delivery methods
+     * FINANCIAL - Pricing, budget, financial capacity requirements
+     * LEGAL - Legal compliance, insurance, bonding, contractual terms
+     * TECHNICAL - Technical specifications, system requirements, capabilities
+     * OTHER - Anything that doesn't fit above categories
+   - Generate sequential IDs: CM-001, CM-002, CM-003, etc.
 
-6. **Naming**: Use clear, task-friendly names:
+6. **De-duplication**: If a requirement appears in multiple files/sections, create ONE entry with multiple mentions in the mentions array
+
+7. **Naming**: Use clear, task-friendly names:
    - Good: "Submit Technical Proposal", "Provide Insurance Certificate", "Complete Budget Form"
    - Bad: "Technical Proposal Document Submission Requirements Section 4.1"
 
-7. **Required vs Optional**:
+8. **Required vs Optional**:
    - Set is_required=true if document explicitly states "required", "mandatory", "must", "shall"
    - Set is_required=false if document states "optional", "if applicable", "may"
 
-8. **Source Location**: Be specific about where you found the requirement:
+9. **Source Location**: Be specific about where you found the requirement:
    - Good: "Section 4.1 - Submission Requirements, Page 12"
    - Bad: "In the document"
 
-9. **Confidence Score**:
-   - "high": Clearly stated requirement with explicit details
-   - "medium": Implied requirement or unclear details
-   - null: If very uncertain
+10. **Confidence Score**:
+    - "high": Clearly stated requirement with explicit details
+    - "medium": Implied requirement or unclear details
+    - null: If very uncertain
 
-10. **Handle Multiple Documents**: If multiple documents are provided, analyze ALL of them and aggregate findings
+11. **Handle Multiple Documents**: If multiple documents are provided, analyze ALL of them and aggregate findings
 
 EXAMPLE OUTPUT (this is what your response should look like):
 {
@@ -292,6 +309,43 @@ EXAMPLE OUTPUT (this is what your response should look like):
         }
       ]
     }
+  ],
+  "compliance_matrix": [
+    {
+      "id": "CM-001",
+      "requirement_text": "The Contractor shall provide 24/7 technical support with a maximum response time of 4 hours for critical issues.",
+      "source_section": "L.4.2.1",
+      "source_page": 15,
+      "category": "TECHNICAL"
+    },
+    {
+      "id": "CM-002",
+      "requirement_text": "The Contractor must maintain ISO 27001 certification throughout the contract period.",
+      "source_section": "L.5.1.3",
+      "source_page": 18,
+      "category": "CERTIFICATION"
+    },
+    {
+      "id": "CM-003",
+      "requirement_text": "The Contractor shall assign a dedicated Project Manager with at least 5 years of relevant experience.",
+      "source_section": "L.6.2",
+      "source_page": 21,
+      "category": "PERSONNEL"
+    },
+    {
+      "id": "CM-004",
+      "requirement_text": "All proposals must be submitted in PDF format with a maximum file size of 25MB.",
+      "source_section": "M.2.1",
+      "source_page": 8,
+      "category": "FORMAT"
+    },
+    {
+      "id": "CM-005",
+      "requirement_text": "The Contractor shall maintain professional liability insurance of at least $2 million.",
+      "source_section": "L.8.4",
+      "source_page": 25,
+      "category": "LEGAL"
+    }
   ]
 }
 
@@ -300,6 +354,136 @@ OUTPUT FORMAT: Return ONLY the JSON object. No markdown code blocks, no conversa
 Now analyze the provided document(s) and extract the information according to these instructions."""
 
     return prompt
+
+
+def repair_truncated_json(json_text: str) -> Dict[str, Any]:
+    """
+    Attempt to repair truncated JSON by closing unclosed brackets and arrays.
+
+    Args:
+        json_text: Potentially truncated JSON string
+
+    Returns:
+        Parsed JSON dictionary with available data
+    """
+    import re
+
+    # Track open brackets and braces
+    open_braces = 0
+    open_brackets = 0
+    in_string = False
+    escape_next = False
+
+    for char in json_text:
+        if escape_next:
+            escape_next = False
+            continue
+        if char == '\\':
+            escape_next = True
+            continue
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == '{':
+            open_braces += 1
+        elif char == '}':
+            open_braces -= 1
+        elif char == '[':
+            open_brackets += 1
+        elif char == ']':
+            open_brackets -= 1
+
+    # Find a safe truncation point (end of last complete object/array)
+    repaired = json_text.rstrip()
+
+    # Remove trailing incomplete content
+    # Look for common truncation patterns and clean them
+    patterns_to_remove = [
+        r',\s*$',  # Trailing comma
+        r',\s*"[^"]*$',  # Incomplete key
+        r':\s*"[^"]*$',  # Incomplete string value
+        r':\s*$',  # Incomplete value
+        r'"[^"]*$',  # Unterminated string
+    ]
+
+    for pattern in patterns_to_remove:
+        repaired = re.sub(pattern, '', repaired)
+
+    # Close any open structures
+    repaired += ']' * open_brackets
+    repaired += '}' * open_braces
+
+    try:
+        result = json.loads(repaired)
+        print(f"✅ Successfully repaired truncated JSON")
+        return result
+    except json.JSONDecodeError:
+        # If still failing, try a more aggressive approach - extract what we can
+        print(f"⚠️ Could not fully repair JSON, extracting partial data...")
+        return extract_partial_json(json_text)
+
+
+def extract_partial_json(json_text: str) -> Dict[str, Any]:
+    """
+    Extract whatever valid JSON sections we can find from truncated text.
+
+    Args:
+        json_text: Truncated JSON string
+
+    Returns:
+        Dictionary with extracted sections
+    """
+    import re
+
+    result = {
+        'project_metadata': {'project_name': None, 'issuer_name': None, 'due_date': None},
+        'pursuit_details': None,
+        'production_details': None,
+        'submission_requirements': [],
+        'compliance_matrix': []
+    }
+
+    # Try to extract project_metadata
+    metadata_match = re.search(r'"project_metadata"\s*:\s*(\{[^}]+\})', json_text)
+    if metadata_match:
+        try:
+            result['project_metadata'] = json.loads(metadata_match.group(1))
+        except:
+            pass
+
+    # Try to extract compliance_matrix items individually
+    cm_items = re.findall(r'\{\s*"id"\s*:\s*"CM-\d+[^}]+\}', json_text)
+    for item_str in cm_items:
+        try:
+            # Clean up the item string
+            item_str = item_str.rstrip(',')
+            if not item_str.endswith('}'):
+                item_str += '}'
+            item = json.loads(item_str)
+            if item.get('id') and item.get('requirement_text'):
+                result['compliance_matrix'].append(item)
+        except:
+            pass
+
+    # Try to extract submission_requirements items
+    sr_items = re.findall(r'\{\s*"response_item_name"\s*:[^}]+\}', json_text)
+    for item_str in sr_items:
+        try:
+            item_str = item_str.rstrip(',')
+            if not item_str.endswith('}'):
+                item_str += '}'
+            item = json.loads(item_str)
+            if item.get('response_item_name'):
+                result['submission_requirements'].append(item)
+        except:
+            pass
+
+    print(f"📋 Extracted partial data: {len(result['compliance_matrix'])} compliance items, "
+          f"{len(result['submission_requirements'])} submission requirements")
+
+    return result
 
 
 def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, Any]:
@@ -314,7 +498,8 @@ def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, 
     """
     try:
         # Initialize Gemini model
-        model = GenerativeModel("gemini-2.0-flash")
+        # Using gemini-2.5-flash - higher output token limits
+        model = GenerativeModel("gemini-2.5-flash")
 
         # Prepare parts for multimodal input
         parts = []
@@ -402,10 +587,12 @@ def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, 
         ]
 
         # Generation config for JSON output
+        # gemini-2.5-flash supports higher output token limits
         generation_config = {
             "temperature": 0.2,
-            "max_output_tokens": 8192,
+            "max_output_tokens": 65536,  # Higher limit for gemini-2.5-flash
             "top_p": 0.8,
+            "response_mime_type": "application/json",  # Ensures valid JSON output
         }
 
         print(f"🤖 Sending request to Gemini for document shredding ({len(files_data)} files)...")
@@ -433,8 +620,12 @@ def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, 
             response_text = response_text[:-3]
         response_text = response_text.strip()
 
-        # Parse JSON
-        result = json.loads(response_text)
+        # Try to parse JSON, with recovery for truncated responses
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError as json_err:
+            print(f"⚠️ JSON parse error: {json_err}. Attempting to repair truncated JSON...")
+            result = repair_truncated_json(response_text)
 
         print(f"✅ Successfully parsed JSON response")
 
@@ -555,6 +746,30 @@ def shred_documents(files: List[Dict[str, str]], org_id: str) -> Dict[str, Any]:
         if not result.get('submission_requirements'):
             result['submission_requirements'] = []
 
+        # Validate compliance_matrix structure
+        if not result.get('compliance_matrix'):
+            result['compliance_matrix'] = []
+        else:
+            # Ensure each item has required fields
+            valid_categories = {'CERTIFICATION', 'EXPERIENCE', 'PERSONNEL', 'FORMAT',
+                              'SUBMISSION', 'FINANCIAL', 'LEGAL', 'TECHNICAL', 'OTHER'}
+            for idx, item in enumerate(result['compliance_matrix']):
+                # Ensure ID exists
+                if not item.get('id'):
+                    item['id'] = f"CM-{str(idx + 1).zfill(3)}"
+                # Ensure category is valid
+                if item.get('category', '').upper() not in valid_categories:
+                    item['category'] = 'OTHER'
+                else:
+                    item['category'] = item['category'].upper()
+                # Ensure required fields exist
+                if not item.get('requirement_text'):
+                    item['requirement_text'] = ''
+                if not item.get('source_section'):
+                    item['source_section'] = None
+                if not item.get('source_page'):
+                    item['source_page'] = None
+
         # Log extraction summary
         print(f"✅ Document shredding complete!")
         print(f"   - Project Name: {result['project_metadata'].get('project_name')}")
@@ -572,7 +787,8 @@ def shred_documents(files: List[Dict[str, str]], org_id: str) -> Dict[str, Any]:
         production = result.get('production_details', {})
         print(f"   - Submission Format: {production.get('submission_format') if production else 'Not found'}")
 
-        print(f"   - Requirements Found: {len(result['submission_requirements'])}")
+        print(f"   - Submission Requirements Found: {len(result['submission_requirements'])}")
+        print(f"   - Compliance Matrix Items Found: {len(result['compliance_matrix'])}")
 
         return result
 
@@ -629,7 +845,8 @@ def shred_documents_endpoint_handler(request_data: Dict[str, Any]) -> Dict[str, 
             'project_metadata': result['project_metadata'],
             'pursuit_details': result.get('pursuit_details'),
             'production_details': result.get('production_details'),
-            'submission_requirements': result['submission_requirements']
+            'submission_requirements': result['submission_requirements'],
+            'compliance_matrix': result.get('compliance_matrix', [])
         }, 200
 
     except Exception as e:
