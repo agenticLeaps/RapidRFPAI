@@ -231,12 +231,15 @@ Explain your answer with specific evidence from our company profile."""
                     updated_req["verification_source"] = "RAG Company Profile"
                     updated_req["rag_confidence"] = verification["confidence"]
                     updated_req["rag_explanation"] = verification["explanation"][:500]
+                    updated_req["rag_sources"] = verification.get("sources", [])  # Include sources for display
                     print(f"    ✅ AUTO_VERIFIED: {verification['status']} (confidence: {verification['confidence']:.2f})")
                 else:
                     # Keep as USER_INPUT but add RAG context
                     updated_req["category"] = "USER_INPUT"
                     updated_req["status"] = verification["status"]
                     updated_req["rag_hint"] = verification["explanation"][:300]
+                    updated_req["rag_confidence"] = verification["confidence"]
+                    updated_req["rag_sources"] = verification.get("sources", [])  # Include sources even for user input
                     print(f"    📝 USER_INPUT needed: {verification['status']} (confidence: {verification['confidence']:.2f})")
             else:
                 # RAG verification failed, needs user input
@@ -433,7 +436,7 @@ Return ONLY valid JSON, no markdown."""
             requirement_text: The requirement text to verify
 
         Returns:
-            Verification result with status, category, confidence, etc.
+            Verification result with status, category, confidence, sources, etc.
         """
         if not self.rag_client:
             return {
@@ -445,14 +448,29 @@ Return ONLY valid JSON, no markdown."""
 
         try:
             result = self.rag_client.verify_requirement(requirement_text)
+
+            # Extract values from RAG result
+            confidence = result.get("confidence", 0)
+            status = result.get("status", "PENDING")
+            explanation = result.get("explanation", "")
+            sources = result.get("sources", [])
+
+            # Determine category based on verification result
+            category = "USER_INPUT"
+            if result.get("verified") and confidence >= 0.6 and status in ["PASS", "FAIL"]:
+                category = "AUTO_VERIFIED"
+
             return {
-                "success": True,
-                "status": result.get("status", "PENDING"),
-                "category": result.get("category", "USER_INPUT"),
-                "rag_confidence": result.get("rag_confidence"),
-                "rag_explanation": result.get("rag_explanation"),
-                "rag_hint": result.get("rag_hint"),
-                "verification_source": result.get("verification_source"),
+                "success": result.get("verified", False),
+                "status": status,
+                "category": category,
+                "confidence": confidence,
+                "rag_confidence": confidence,  # Alias for backwards compatibility
+                "explanation": explanation,
+                "rag_explanation": explanation,  # Alias for backwards compatibility
+                "sources": sources,
+                "verification_source": "RAG Company Profile" if result.get("verified") else None,
+                "nodes_retrieved": result.get("nodes_retrieved", 0),
             }
         except Exception as e:
             print(f"⚠️ [INTELLIGENCE] Single item RAG verification failed: {e}")
