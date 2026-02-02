@@ -30,7 +30,7 @@ class BaseExtractionAgent(ABC):
     # Agent configuration
     AGENT_TYPE: str = "BASE"
     MAX_ITEMS: Optional[int] = None
-    MODEL_NAME: str = "gemini-1.5-flash"  # Using 1.5-flash for better rate limits
+    MODEL_NAME: str = "gemini-2.5-flash-lite"  # Using 2.5-flash-lite for better rate limits
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 5  # seconds
 
@@ -38,7 +38,7 @@ class BaseExtractionAgent(ABC):
         self.model = GenerativeModel(self.MODEL_NAME)
         self.generation_config = {
             "temperature": 0.2,
-            "max_output_tokens": 65536,
+            "max_output_tokens": 32768,  # Higher limit for complex RFPs (max is 65535)
             "top_p": 0.8,
             "response_mime_type": "application/json",
         }
@@ -259,6 +259,9 @@ class BaseExtractionAgent(ABC):
             response_text = response_text[:-3]
         response_text = response_text.strip()
 
+        # Sanitize control characters in JSON strings
+        response_text = self._sanitize_json_string(response_text)
+
         try:
             result = json.loads(response_text)
         except json.JSONDecodeError as e:
@@ -267,6 +270,58 @@ class BaseExtractionAgent(ABC):
 
         print(f"✅ [{self.AGENT_TYPE}] Successfully parsed response")
         return result
+
+    def _sanitize_json_string(self, json_text: str) -> str:
+        """
+        Sanitize control characters in JSON strings that cause parse errors.
+        Handles unescaped newlines, tabs, and other control chars within string values.
+        """
+        import re
+
+        result = []
+        in_string = False
+        escape_next = False
+        i = 0
+
+        while i < len(json_text):
+            char = json_text[i]
+
+            if escape_next:
+                result.append(char)
+                escape_next = False
+                i += 1
+                continue
+
+            if char == '\\':
+                result.append(char)
+                escape_next = True
+                i += 1
+                continue
+
+            if char == '"':
+                in_string = not in_string
+                result.append(char)
+                i += 1
+                continue
+
+            # If inside a string, escape control characters
+            if in_string:
+                if char == '\n':
+                    result.append('\\n')
+                elif char == '\r':
+                    result.append('\\r')
+                elif char == '\t':
+                    result.append('\\t')
+                elif ord(char) < 32:  # Other control characters
+                    result.append(f'\\u{ord(char):04x}')
+                else:
+                    result.append(char)
+            else:
+                result.append(char)
+
+            i += 1
+
+        return ''.join(result)
 
     def _extract_text_from_docx(self, file_bytes: bytes) -> str:
         """Extract text from DOCX file"""
@@ -287,47 +342,142 @@ class BaseExtractionAgent(ABC):
         return "\n\n".join(text_parts)
 
     def _repair_truncated_json(self, json_text: str) -> Dict[str, Any]:
-        """Attempt to repair truncated JSON"""
-        # Track open brackets
-        open_braces = 0
-        open_brackets = 0
-        in_string = False
-        escape_next = False
+        """Attempt to repair truncated JSON with multiple strategies"""
+        import re
 
-        for char in json_text:
-            if escape_next:
-                escape_next = False
-                continue
-            if char == '\\':
-                escape_next = True
-                continue
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
+        # Strategy 1: Find and close unclosed structures
+        def try_close_structures(text: str) -> Optional[Dict]:
+            # Track open brackets
+            open_braces = 0
+            open_brackets = 0
+            in_string = False
+            escape_next = False
+            last_valid_pos = 0
+
+            for i, char in enumerate(text):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\':
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    if not in_string:
+                        last_valid_pos = i
+                    continue
+                if in_string:
+                    continue
+                if char in '{}[]':
+                    last_valid_pos = i
+                if char == '{':
+                    open_braces += 1
+                elif char == '}':
+                    open_braces -= 1
+                elif char == '[':
+                    open_brackets += 1
+                elif char == ']':
+                    open_brackets -= 1
+
+            # Close unclosed structures
+            repaired = text.rstrip()
+
+            # If we're inside a string, try to close it
             if in_string:
-                continue
-            if char == '{':
-                open_braces += 1
-            elif char == '}':
-                open_braces -= 1
-            elif char == '[':
-                open_brackets += 1
-            elif char == ']':
-                open_brackets -= 1
+                # Find the last quote and truncate there, then close the string
+                repaired = repaired.rstrip()
+                # Remove partial string content
+                while repaired and repaired[-1] != '"':
+                    repaired = repaired[:-1]
+                if not repaired.endswith('"'):
+                    repaired += '"'
 
-        # Close unclosed structures
-        repaired = json_text.rstrip()
+            # Remove trailing incomplete content (commas, colons, partial keys)
+            while repaired:
+                stripped = repaired.rstrip()
+                if stripped and stripped[-1] in '"}]':
+                    break
+                repaired = repaired[:-1]
 
-        # Remove trailing incomplete content
-        while repaired and repaired[-1] not in '"}]':
-            repaired = repaired[:-1]
+            # Recount after cleanup
+            open_braces = 0
+            open_brackets = 0
+            in_string = False
+            escape_next = False
+            for char in repaired:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\':
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == '{':
+                    open_braces += 1
+                elif char == '}':
+                    open_braces -= 1
+                elif char == '[':
+                    open_brackets += 1
+                elif char == ']':
+                    open_brackets -= 1
 
-        # Add closing brackets
-        repaired += ']' * open_brackets
-        repaired += '}' * open_braces
+            # Add closing brackets
+            repaired += ']' * max(0, open_brackets)
+            repaired += '}' * max(0, open_braces)
 
-        try:
-            return json.loads(repaired)
-        except json.JSONDecodeError:
-            # Return empty result if repair fails
-            return {}
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                return None
+
+        # Strategy 2: Extract partial data using regex
+        def extract_partial_data(text: str) -> Dict[str, Any]:
+            result = {}
+
+            # Try to extract each major section
+            sections = [
+                ('volume_structure', r'"volume_structure"\s*:\s*\[(.*?)\]', list),
+                ('required_attachments', r'"required_attachments"\s*:\s*\[(.*?)\]', list),
+                ('eligibility_items', r'"eligibility_items"\s*:\s*\[(.*?)\]', list),
+                ('risks', r'"risks"\s*:\s*\[(.*?)\]', list),
+                ('competitive_insights', r'"competitive_insights"\s*:\s*\[(.*?)\]', list),
+                ('format_requirements', r'"format_requirements"\s*:\s*(\{[^}]+\})', dict),
+                ('key_dates', r'"key_dates"\s*:\s*(\{[^}]+\})', dict),
+                ('pricing_intelligence', r'"pricing_intelligence"\s*:\s*(\{[^}]+\})', dict),
+                ('go_no_go_recommendation', r'"go_no_go_recommendation"\s*:\s*(\{[^}]+\})', dict),
+            ]
+
+            for key, pattern, expected_type in sections:
+                try:
+                    match = re.search(pattern, text, re.DOTALL)
+                    if match:
+                        content = match.group(1) if expected_type == dict else f'[{match.group(1)}]'
+                        parsed = json.loads(content)
+                        result[key] = parsed
+                except:
+                    if expected_type == list:
+                        result[key] = []
+                    else:
+                        result[key] = {}
+
+            return result
+
+        # Try Strategy 1 first
+        result = try_close_structures(json_text)
+        if result:
+            print(f"✅ [{self.AGENT_TYPE}] Repaired JSON using structure closure")
+            return result
+
+        # Try Strategy 2 as fallback
+        print(f"⚠️ [{self.AGENT_TYPE}] Structure closure failed, extracting partial data...")
+        result = extract_partial_data(json_text)
+        if any(result.values()):
+            print(f"✅ [{self.AGENT_TYPE}] Extracted partial data: {[k for k, v in result.items() if v]}")
+            return result
+
+        print(f"❌ [{self.AGENT_TYPE}] JSON repair failed completely")
+        return {}

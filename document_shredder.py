@@ -507,8 +507,8 @@ def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, 
     """
     try:
         # Initialize Gemini model
-        # Using gemini-2.5-flash - higher output token limits
-        model = GenerativeModel("gemini-2.5-flash")
+        # Using gemini-2.5-flash-lite - better rate limits
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         # Prepare parts for multimodal input
         parts = []
@@ -596,10 +596,10 @@ def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, 
         ]
 
         # Generation config for JSON output
-        # gemini-2.5-flash supports higher output token limits
+        # gemini-2.5-flash-lite max is 65535 (exclusive)
         generation_config = {
             "temperature": 0.2,
-            "max_output_tokens": 65536,  # Higher limit for gemini-2.5-flash
+            "max_output_tokens": 32768,  # Higher limit for complex RFPs
             "top_p": 0.8,
             "response_mime_type": "application/json",  # Ensures valid JSON output
         }

@@ -27,19 +27,22 @@ class RAGVerificationClient:
     """
     Client for querying the Rapidrfpv2 RAG system to verify eligibility requirements
     against company profile/knowledge base.
+
+    Uses the /api/v3/chat endpoint with orgId for RAG queries.
     """
 
-    def __init__(self, service_url: str = None, session_id: str = None):
+    def __init__(self, service_url: str = None, org_id: str = None):
         """
         Initialize RAG client.
 
         Args:
-            service_url: URL of the Rapidrfpv2 service (defaults to NODERAG_SERVICE_URL env var)
-            session_id: Session ID for the company's knowledge base
+            service_url: URL of the RapidRFPAI service (defaults to RAPIDRFP_SERVICE_URL env var)
+            org_id: Organization ID for the company's knowledge base
         """
-        self.service_url = service_url or os.environ.get('NODERAG_SERVICE_URL', 'http://0.0.0.0:5001')
-        self.session_id = session_id
-        self.timeout = 30  # seconds per request
+        # Use self-reference for internal calls, or external URL
+        self.service_url = service_url or os.environ.get('RAPIDRFP_SERVICE_URL', 'https://rapidrfpai-1.onrender.com')
+        self.org_id = org_id
+        self.timeout = 60  # seconds per request (increased for RAG processing)
 
     def verify_requirement(self, requirement_text: str) -> Dict[str, Any]:
         """
@@ -51,41 +54,39 @@ class RAGVerificationClient:
         Returns:
             Dict with verification result: status, confidence, source, explanation
         """
-        if not self.session_id:
-            print("⚠️ [RAG] No session ID provided, skipping verification")
+        if not self.org_id:
+            print("⚠️ [RAG] No org_id provided, skipping verification")
             return {
                 "verified": False,
                 "status": "PENDING",
                 "confidence": 0,
-                "explanation": "No company profile session available",
+                "explanation": "No organization ID available for RAG lookup",
                 "sources": []
             }
 
         try:
             # Formulate the verification query
-            query = f"""Based on our company profile and capabilities, do we meet this requirement?
+            query = f"""Based on our company profile and capabilities, do we meet this RFP requirement?
 
 Requirement: {requirement_text}
 
-Please answer with:
-1. YES - if we clearly meet this requirement
-2. NO - if we clearly do NOT meet this requirement
-3. PARTIAL - if we partially meet it or need clarification
-4. UNKNOWN - if there's not enough information in our profile
+Answer with ONE of these at the START of your response:
+- YES - if we clearly meet this requirement (provide evidence)
+- NO - if we clearly do NOT meet this requirement (explain why)
+- PARTIAL - if we partially meet it or need clarification
+- UNKNOWN - if there's not enough information in our company profile
 
-Explain your answer with specific evidence from our company profile."""
+Then explain your answer with specific evidence from our company profile."""
 
-            # Call RAG API
+            # Call the /api/v3/chat endpoint (same as working chat API)
             response = requests.post(
-                f"{self.service_url}/api/answer",
+                f"{self.service_url}/api/v3/chat",
                 json={
                     "query": query,
-                    "k_hnsw": 10,
-                    "k_final": 15,
-                    "use_structured_prompt": True
+                    "orgId": self.org_id,
+                    "ragversion": "v2"
                 },
                 headers={
-                    "X-Session-ID": self.session_id,
                     "Content-Type": "application/json"
                 },
                 timeout=self.timeout
@@ -103,7 +104,8 @@ Explain your answer with specific evidence from our company profile."""
 
             result = response.json()
 
-            if not result.get("success"):
+            # Handle error responses
+            if result.get("success") == False or result.get("error"):
                 return {
                     "verified": False,
                     "status": "PENDING",
@@ -112,61 +114,123 @@ Explain your answer with specific evidence from our company profile."""
                     "sources": []
                 }
 
-            # Parse the RAG answer to determine status
-            answer = result.get("answer", "")
+            # Extract answer from response - handle both v1 and v2 formats
+            # v1: {"answer": "..."}
+            # v2 (NodeRAG): {"response": "...", "metadata": {"sources": [...], "confidence": 0.8}}
+            answer = result.get("answer", "") or result.get("response", "") or ""
             answer_upper = answer.upper()
-            retrieved_nodes = result.get("retrieved_nodes", [])
 
-            # Check if RAG has no data for this session (empty knowledge base)
-            if "NO RELEVANT INFORMATION" in answer_upper or "NOT FOUND" in answer_upper:
-                print(f"⚠️ [RAG] No company profile data found in session - skipping verification")
+            # Get metadata from v2 response
+            metadata = result.get("metadata", {})
+
+            # Get sources - check multiple locations
+            # v2: metadata.sources or top-level sources
+            # v1: search_results or sources
+            retrieved_nodes = (
+                metadata.get("sources", []) or
+                result.get("sources", []) or
+                result.get("search_results", []) or
+                result.get("retrieved_nodes", [])
+            )
+
+            # Get RAG confidence from metadata if available
+            rag_confidence = metadata.get("confidence", 0)
+
+            # Check if RAG has no relevant data
+            no_data_indicators = [
+                "NO RELEVANT INFORMATION",
+                "NOT FOUND",
+                "DON'T HAVE ENOUGH INFORMATION",
+                "I DON'T HAVE",
+                "CANNOT FIND",
+                "NO INFORMATION AVAILABLE"
+            ]
+            if any(indicator in answer_upper for indicator in no_data_indicators):
+                print(f"⚠️ [RAG] No relevant company data found for this requirement")
                 return {
                     "verified": False,
                     "status": "PENDING",
                     "confidence": 0,
-                    "explanation": "No company profile documents indexed. Please upload company profile to enable auto-verification.",
+                    "explanation": "No relevant company profile data found for this requirement.",
                     "sources": []
                 }
 
-            # Determine status from answer
+            # Determine status from answer (check first 100 chars for the verdict)
             status = "PENDING"
-            confidence = 0
+            confidence = rag_confidence if rag_confidence > 0 else 0  # Start with RAG confidence if available
+            answer_start = answer_upper[:100]
 
-            if "YES" in answer_upper[:50]:  # Check beginning of answer
+            if answer_start.startswith("YES") or "YES -" in answer_start or "YES:" in answer_start:
                 status = "PASS"
-                confidence = 0.8
-            elif "NO" in answer_upper[:50]:
+                if confidence == 0:
+                    confidence = 0.85
+            elif answer_start.startswith("NO") or "NO -" in answer_start or "NO:" in answer_start:
                 status = "FAIL"
-                confidence = 0.8
-            elif "PARTIAL" in answer_upper[:50]:
+                if confidence == 0:
+                    confidence = 0.85
+            elif "PARTIAL" in answer_start:
                 status = "PARTIAL"
-                confidence = 0.6
-            else:
+                if confidence == 0:
+                    confidence = 0.6
+            elif "UNKNOWN" in answer_start:
                 status = "PENDING"
-                confidence = 0.3
+                if confidence == 0:
+                    confidence = 0.3
+            else:
+                # Try to infer from content
+                if "WE MEET" in answer_upper or "WE HAVE" in answer_upper or "WE ARE" in answer_upper:
+                    status = "PASS"
+                    if confidence == 0:
+                        confidence = 0.7
+                elif "WE DO NOT" in answer_upper or "WE DON'T" in answer_upper or "NOT MEET" in answer_upper:
+                    status = "FAIL"
+                    if confidence == 0:
+                        confidence = 0.7
+                else:
+                    status = "PENDING"
+                    if confidence == 0:
+                        confidence = 0.4
 
-            # Adjust confidence based on retrieval quality
-            total_nodes = result.get("retrieval_metadata", {}).get("total_nodes_retrieved", 0)
-            if total_nodes > 5:
+            # Adjust confidence based on source count
+            if len(retrieved_nodes) > 3:
                 confidence = min(confidence + 0.1, 1.0)
-            elif total_nodes < 2:
+            elif len(retrieved_nodes) < 1:
                 confidence = max(confidence - 0.2, 0.1)
 
-            # Extract source references
+            # Extract source references with full text for display
             sources = []
+            source_text_parts = []
             for node in retrieved_nodes[:3]:  # Top 3 sources
-                sources.append({
-                    "content": node.get("content", "")[:200],
-                    "type": node.get("type", "unknown")
-                })
+                if isinstance(node, dict):
+                    content = node.get("content", node.get("text", node.get("chunk_text", "")))
+                    if content:
+                        sources.append({
+                            "content": content[:500],  # More content for display
+                            "type": node.get("type", node.get("source_type", "document")),
+                            "file_name": node.get("file_name", node.get("filename", "")),
+                            "similarity": node.get("similarity_score", node.get("score", 0))
+                        })
+                        source_text_parts.append(content[:300])
+                elif isinstance(node, str):
+                    sources.append({
+                        "content": node[:500],
+                        "type": "document"
+                    })
+                    source_text_parts.append(node[:300])
+
+            # Combine source texts for ragSourceText field
+            combined_source_text = "\n---\n".join(source_text_parts) if source_text_parts else None
+
+            print(f"✅ [RAG] Verification result: {status} (confidence: {confidence:.2f}, sources: {len(sources)})")
 
             return {
                 "verified": True,
                 "status": status,
                 "confidence": confidence,
-                "explanation": result.get("answer", ""),
+                "explanation": answer[:500],  # Limit explanation length
                 "sources": sources,
-                "nodes_retrieved": total_nodes
+                "source_text": combined_source_text,  # Combined source text for ragSourceText
+                "rag_confidence": confidence,  # Explicit field for confidence
             }
 
         except requests.exceptions.Timeout:
@@ -199,8 +263,8 @@ Explain your answer with specific evidence from our company profile."""
         Returns:
             List of requirements with updated verification results
         """
-        if not self.session_id:
-            print("⚠️ [RAG] No session ID provided, skipping batch verification")
+        if not self.org_id:
+            print("⚠️ [RAG] No org_id provided, skipping batch verification")
             return requirements
 
         print(f"🔍 [RAG] Verifying {len(requirements)} requirements against company profile...")
@@ -271,16 +335,16 @@ class IntelligenceAgent(BaseExtractionAgent):
 
     AGENT_TYPE = "INTELLIGENCE"
 
-    def __init__(self, company_profile: Optional[Dict] = None, rag_session_id: str = None):
+    def __init__(self, company_profile: Optional[Dict] = None, org_id: str = None):
         super().__init__()
         self.company_profile = company_profile or {}
-        self.rag_session_id = rag_session_id
+        self.org_id = org_id
         self.rag_client = None
 
-        # Initialize RAG client if session ID provided
-        if rag_session_id:
-            self.rag_client = RAGVerificationClient(session_id=rag_session_id)
-            print(f"🔗 [INTELLIGENCE] RAG verification enabled (session: {rag_session_id[:8]}...)")
+        # Initialize RAG client if org_id provided
+        if org_id:
+            self.rag_client = RAGVerificationClient(org_id=org_id)
+            print(f"🔗 [INTELLIGENCE] RAG verification enabled (org: {org_id[:8]}...)")
 
     def get_prompt(self) -> str:
         # Build company profile context if available
@@ -604,9 +668,9 @@ def extract_intelligence_handler(request_data: Dict) -> Dict[str, Any]:
     Args:
         request_data: Dict with:
             - 'files': List of file dicts with gcs_url, filename, file_id
-            - 'org_id': Organization ID
+            - 'org_id': Organization ID (also used for RAG knowledge base lookup)
             - 'company_profile': Optional static company profile dict
-            - 'rag_session_id': Optional RAG session ID for company knowledge base verification
+            - 'rag_session_id': Deprecated - use org_id instead
             - 'skip_rag_verification': If True, skip RAG verification (for two-phase approach)
 
     Returns:
@@ -615,7 +679,8 @@ def extract_intelligence_handler(request_data: Dict) -> Dict[str, Any]:
     files = request_data.get("files", [])
     org_id = request_data.get("org_id", "")
     company_profile = request_data.get("company_profile")
-    rag_session_id = request_data.get("rag_session_id")
+    # Support both org_id and rag_session_id (rag_session_id is deprecated, use org_id)
+    rag_org_id = request_data.get("rag_session_id") or org_id
     skip_rag_verification = request_data.get("skip_rag_verification", False)
 
     if not files:
@@ -627,14 +692,14 @@ def extract_intelligence_handler(request_data: Dict) -> Dict[str, Any]:
     # Log RAG configuration
     if skip_rag_verification:
         print("ℹ️ [INTELLIGENCE] Two-phase mode - RAG verification will be done per-item")
-    elif rag_session_id:
-        print(f"🔗 [INTELLIGENCE] RAG verification will use session: {rag_session_id[:8]}...")
+    elif rag_org_id:
+        print(f"🔗 RAG verification enabled with org: {rag_org_id[:8]}...")
     else:
-        print("ℹ️ [INTELLIGENCE] No RAG session ID provided - eligibility items will need manual verification")
+        print("ℹ️ [INTELLIGENCE] No org_id provided - eligibility items will need manual verification")
 
     agent = IntelligenceAgent(
         company_profile=company_profile,
-        rag_session_id=rag_session_id
+        org_id=rag_org_id
     )
     return agent.extract(files, org_id, skip_rag_verification=skip_rag_verification)
 
@@ -646,13 +711,15 @@ def verify_item_handler(request_data: Dict) -> Dict[str, Any]:
     Args:
         request_data: Dict with:
             - 'requirement_text': The requirement text to verify
-            - 'rag_session_id': RAG session ID for company knowledge base verification
+            - 'org_id': Organization ID for RAG knowledge base lookup
+            - 'rag_session_id': Deprecated - use org_id instead
 
     Returns:
         Verification result with status, category, confidence
     """
     requirement_text = request_data.get("requirement_text", "")
-    rag_session_id = request_data.get("rag_session_id")
+    # Support both org_id and rag_session_id
+    org_id = request_data.get("org_id") or request_data.get("rag_session_id")
 
     if not requirement_text:
         return {
@@ -660,13 +727,13 @@ def verify_item_handler(request_data: Dict) -> Dict[str, Any]:
             "error": "No requirement_text provided"
         }
 
-    if not rag_session_id:
+    if not org_id:
         return {
             "success": False,
-            "error": "No rag_session_id provided",
+            "error": "No org_id provided",
             "status": "PENDING",
             "category": "USER_INPUT"
         }
 
-    agent = IntelligenceAgent(rag_session_id=rag_session_id)
+    agent = IntelligenceAgent(org_id=org_id)
     return agent.verify_single_item(requirement_text)

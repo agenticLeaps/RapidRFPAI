@@ -673,7 +673,7 @@ Generate {max_variations} related search queries that would find the same or sim
 Return only the queries, one per line, without numbering or explanations.
 """
         
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         response = model.generate_content(
             [Part.from_text(expansion_prompt)],
             generation_config={
@@ -1460,7 +1460,7 @@ Return the extracted content as plain text without any formatting or special cha
 """
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content
         parts = [Part.from_text(prompt)]
@@ -2327,7 +2327,7 @@ Question:
 {query}
 """
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         responses = model.generate_content(
             [Part.from_text(prompt)],
@@ -2529,7 +2529,7 @@ Format your response as a valid JSON object with sections and questions, like th
             # Combine API prompt + hardcoded JSON format
             prompt = f"{api_prompt}\n{json_format}"
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content based on file type
         parts = [Part.from_text(prompt)]
@@ -6179,7 +6179,7 @@ Provide only the bullet points without any additional explanations or formatting
             prompt += f"\n\nNote: This text is from a {file_type.upper()} file."
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         response = model.generate_content(
             [Part.from_text(prompt)],
@@ -6423,7 +6423,7 @@ Provide only the processed text without any additional explanations or formattin
             final_prompt += f"\n\nRelevant context from your knowledge base:\n{context_text[:1000]}...\n\nUse this context to inform your response but focus on processing the text as requested."
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         response = model.generate_content(
             [Part.from_text(final_prompt)],
@@ -6836,7 +6836,7 @@ Format your response as a valid JSON array with objects containing "title", "typ
 IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
 """
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content based on file type
         parts = [Part.from_text(prompt)]
@@ -10398,7 +10398,7 @@ Please provide:
 Focus on extracting factual information that could be used to answer questions or fill in requirements found in forms or questionnaires.
 """
         
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Generate comprehensive document analysis
         response = model.generate_content(
@@ -10486,7 +10486,7 @@ If the document doesn't contain relevant information, respond with "Information 
 Answer:
 """
             
-            model = GenerativeModel("gemini-2.0-flash")
+            model = GenerativeModel("gemini-2.5-flash-lite")
             
             response = model.generate_content(
                 [Part.from_text(prompt)],
@@ -10770,7 +10770,7 @@ Please respond in JSON format:
 """
 
         # Use Vertex AI to analyze
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         response = model.generate_content(
             [Part.from_text(analysis_prompt)],
