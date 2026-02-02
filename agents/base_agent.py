@@ -5,6 +5,7 @@ All agents inherit from this and implement extract() method
 
 import os
 import json
+import time
 import tempfile
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Tuple, Optional
@@ -12,6 +13,7 @@ from datetime import datetime
 
 from google.cloud import storage
 from google.oauth2 import service_account
+from google.api_core.exceptions import ResourceExhausted
 from vertexai.generative_models import GenerativeModel, Part, SafetySetting
 
 # For docx conversion
@@ -28,7 +30,9 @@ class BaseExtractionAgent(ABC):
     # Agent configuration
     AGENT_TYPE: str = "BASE"
     MAX_ITEMS: Optional[int] = None
-    MODEL_NAME: str = "gemini-2.5-flash"
+    MODEL_NAME: str = "gemini-1.5-flash"  # Using 1.5-flash for better rate limits
+    MAX_RETRIES: int = 3
+    RETRY_DELAY: int = 5  # seconds
 
     def __init__(self):
         self.model = GenerativeModel(self.MODEL_NAME)
@@ -218,12 +222,30 @@ class BaseExtractionAgent(ABC):
 
         print(f"🤖 [{self.AGENT_TYPE}] Sending request to Gemini ({len(files_data)} files)...")
 
-        response = self.model.generate_content(
-            parts,
-            generation_config=self.generation_config,
-            safety_settings=self.safety_settings,
-            stream=False
-        )
+        # Retry logic for rate limiting
+        response = None
+        last_error = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = self.model.generate_content(
+                    parts,
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                    stream=False
+                )
+                break  # Success, exit retry loop
+            except ResourceExhausted as e:
+                last_error = e
+                if attempt < self.MAX_RETRIES - 1:
+                    wait_time = self.RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                    print(f"⚠️ [{self.AGENT_TYPE}] Rate limited (attempt {attempt + 1}/{self.MAX_RETRIES}). Waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ [{self.AGENT_TYPE}] Rate limit exceeded after {self.MAX_RETRIES} attempts")
+                    raise last_error
+
+        if response is None:
+            raise last_error or Exception("Failed to get response from Gemini")
 
         # Parse response
         response_text = response.text.strip()
