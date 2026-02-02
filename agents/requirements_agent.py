@@ -37,6 +37,8 @@ EXTRACT:
    - format_requirements: Specific format for this volume
    - subsections: Array of required subsections with names and page limits
    - is_separately_bound: Whether this volume must be separate
+   - source_section: Where this requirement is stated (e.g., "Section L.3")
+   - source_text: The EXACT quoted text from the document where this is defined (verbatim quote, max 500 chars)
 
 2. **required_attachments** - Mandatory documents/forms
    For each attachment:
@@ -45,7 +47,8 @@ EXTRACT:
    - file_extension: Required file format extension (e.g., ".pdf", ".xlsx", ".docx", ".doc", ".xls", ".zip", ".txt", null if not specified)
      IMPORTANT: Extract the exact file extension if the RFP specifies a format (e.g., "Submit in PDF format" -> ".pdf", "Excel spreadsheet" -> ".xlsx")
    - template_provided: true/false - is a template/form provided
-   - source_section: Where this requirement is stated
+   - source_section: Where this requirement is stated (e.g., "Section L.5.2")
+   - source_text: The EXACT quoted text from the document where this requirement is stated (verbatim quote, max 500 chars)
    - is_mandatory: true/false
    - submission_method: How to submit (with proposal, separate, portal, etc.)
 
@@ -69,7 +72,8 @@ EXTRACT:
    - weight: Percentage or points if specified
    - description: What is being evaluated
    - subfactors: Array of subfactors with names and weights
-   - source_section: Where defined
+   - source_section: Where defined (e.g., "Section M.2")
+   - source_text: The EXACT quoted text from the document defining this factor (verbatim quote, max 500 chars)
 
 5. **key_dates** - Important deadlines
    - questions_due: Deadline for questions
@@ -116,6 +120,8 @@ Return ONLY valid JSON, no markdown."""
                     "format_requirements": vol.get("format_requirements"),
                     "subsections": vol.get("subsections", []),
                     "is_separately_bound": bool(vol.get("is_separately_bound", False)),
+                    "source_section": vol.get("source_section"),
+                    "source_text": vol.get("source_text"),
                 })
 
         # Required attachments
@@ -132,6 +138,7 @@ Return ONLY valid JSON, no markdown."""
                     "file_extension": file_ext.lower() if file_ext else None,
                     "template_provided": bool(att.get("template_provided", False)),
                     "source_section": att.get("source_section"),
+                    "source_text": att.get("source_text"),
                     "is_mandatory": bool(att.get("is_mandatory", True)),
                     "submission_method": att.get("submission_method"),
                 })
@@ -163,6 +170,7 @@ Return ONLY valid JSON, no markdown."""
                     "description": factor.get("description", ""),
                     "subfactors": factor.get("subfactors", []),
                     "source_section": factor.get("source_section"),
+                    "source_text": factor.get("source_text"),
                 })
 
         # Key dates

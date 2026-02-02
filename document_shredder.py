@@ -186,12 +186,17 @@ INSTRUCTIONS:
    - Good: "Section 4.1 - Submission Requirements, Page 12"
    - Bad: "In the document"
 
-10. **Confidence Score**:
+10. **Source Text**: For each requirement/item, include the EXACT verbatim text from the document:
+    - Copy the relevant sentence or paragraph word-for-word
+    - Keep it concise (max 500 characters)
+    - This helps users verify the extraction against the original document
+
+11. **Confidence Score**:
     - "high": Clearly stated requirement with explicit details
     - "medium": Implied requirement or unclear details
     - null: If very uncertain
 
-11. **Handle Multiple Documents**: If multiple documents are provided, analyze ALL of them and aggregate findings
+12. **Handle Multiple Documents**: If multiple documents are provided, analyze ALL of them and aggregate findings
 
 EXAMPLE OUTPUT (this is what your response should look like):
 {
@@ -276,6 +281,7 @@ EXAMPLE OUTPUT (this is what your response should look like):
         {
           "source_file": "RFP_Main_Document.pdf",
           "source_location": "Section 4.1 - Submission Requirements, Page 12",
+          "source_text": "The Offeror shall submit a Technical Proposal not exceeding 20 pages that includes a detailed technical approach, methodology, timeline, deliverables, and system architecture diagrams.",
           "confidence_score": "high"
         }
       ]
@@ -288,11 +294,13 @@ EXAMPLE OUTPUT (this is what your response should look like):
         {
           "source_file": "RFP_Main_Document.pdf",
           "source_location": "Section 4.2 - Qualification Requirements, Page 15",
+          "source_text": "Offerors must provide audited financial statements for the past three (3) fiscal years to demonstrate financial stability and capacity to execute the project.",
           "confidence_score": "high"
         },
         {
           "source_file": "Appendix_B.pdf",
           "source_location": "Page 2 - Required Documents Checklist, Item 7",
+          "source_text": "Item 7: Three years of audited financial statements (required)",
           "confidence_score": "high"
         }
       ]
@@ -305,6 +313,7 @@ EXAMPLE OUTPUT (this is what your response should look like):
         {
           "source_file": "RFP_Main_Document.pdf",
           "source_location": "Section 5.3 - Required Forms, Page 22",
+          "source_text": "All offerors must complete and submit the Conflict of Interest Disclosure Form (Appendix C) with their proposal.",
           "confidence_score": "high"
         }
       ]
