@@ -11440,6 +11440,202 @@ def shred_documents_v3():
         }), 500
 
 
+# ================================
+# MULTI-PASS EXTRACTION AGENTS
+# ================================
+
+@app.route("/api/v3/extract-metadata", methods=["POST", "OPTIONS"])
+def extract_metadata_v3():
+    """V3 Metadata Extraction - Pass 1 (Blocking)
+    Extracts project metadata needed for project creation.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.metadata_agent import extract_metadata_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        org_id = data.get("org_id", "")
+
+        print(f"📋 V3 Metadata Extraction: Processing {len(files)} files")
+
+        result = extract_metadata_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Metadata Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Metadata extraction failed: {str(e)}",
+            "agent_type": "METADATA"
+        }), 500
+
+
+@app.route("/api/v3/agents/intelligence", methods=["POST", "OPTIONS"])
+def extract_intelligence_v3():
+    """V3 Intelligence Extraction - Pass 2 (Background)
+    Extracts Go/No-Go assessment, risks, competitive insights, and pricing intelligence.
+    Also performs RAG-based eligibility verification if rag_session_id is provided.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.intelligence_agent import extract_intelligence_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        rag_session_id = data.get("rag_session_id")
+
+        print(f"🧠 V3 Intelligence Extraction: Processing {len(files)} files")
+        if rag_session_id:
+            print(f"🔗 RAG verification enabled with session: {rag_session_id[:8]}...")
+        else:
+            print(f"ℹ️ No RAG session provided - eligibility items will need manual verification")
+
+        result = extract_intelligence_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Intelligence Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Intelligence extraction failed: {str(e)}",
+            "agent_type": "INTELLIGENCE"
+        }), 500
+
+
+@app.route("/api/v3/agents/intelligence/verify-item", methods=["POST", "OPTIONS"])
+def verify_eligibility_item():
+    """V3 Single Eligibility Item RAG Verification
+    Verifies a single eligibility requirement against company profile via RAG.
+    Used for per-item loading in the Go/No-Go UI.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.intelligence_agent import verify_item_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement_text = data.get("requirement_text", "")
+        if not requirement_text:
+            return jsonify({"error": "No requirement_text provided"}), 400
+
+        result = verify_item_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 200  # Still 200, client handles error state
+
+    except Exception as e:
+        print(f"❌ V3 Item Verification error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Item verification failed: {str(e)}",
+            "status": "PENDING",
+            "category": "USER_INPUT"
+        }), 500
+
+
+@app.route("/api/v3/agents/compliance", methods=["POST", "OPTIONS"])
+def extract_compliance_v3():
+    """V3 Compliance Extraction - Pass 3 (Background)
+    Extracts compliance matrix items from RFP documents.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.compliance_agent import extract_compliance_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        print(f"✅ V3 Compliance Extraction: Processing {len(files)} files")
+
+        result = extract_compliance_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Compliance Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Compliance extraction failed: {str(e)}",
+            "agent_type": "COMPLIANCE"
+        }), 500
+
+
+@app.route("/api/v3/agents/requirements", methods=["POST", "OPTIONS"])
+def extract_requirements_v3():
+    """V3 Requirements Extraction - Pass 4 (Background)
+    Extracts submission requirements, volume structure, and format specifications.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.requirements_agent import extract_requirements_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        print(f"📝 V3 Requirements Extraction: Processing {len(files)} files")
+
+        result = extract_requirements_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Requirements Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Requirements extraction failed: {str(e)}",
+            "agent_type": "REQUIREMENTS"
+        }), 500
+
+
 # Keep-alive service for Render server
 def keep_alive_service():
     """Background service that pings the server to keep it alive"""
