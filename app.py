@@ -11723,7 +11723,7 @@ def workspace_ai():
 
 
 def get_spreadsheet_system_prompt(context: dict) -> str:
-    """Generate system prompt for spreadsheet AI"""
+    """Generate system prompt for spreadsheet AI with enhanced context"""
 
     # Extract context info
     active_cell = context.get("activeCell", "A1")
@@ -11734,8 +11734,22 @@ def get_spreadsheet_system_prompt(context: dict) -> str:
     total_rows = sheet_data.get("totalRows", 0)
     total_cols = sheet_data.get("totalCols", 0)
 
+    # Extract enhanced insights if available
+    insights = context.get("insights", {})
+    columns_info = insights.get("columns", {})
+    duplicate_rows = insights.get("duplicateRows", [])
+    empty_rows = insights.get("emptyRows", [])
+    relevant_rows = context.get("relevantRows", [])
+
+    # Use formatted context if provided (from context manager)
+    formatted_context = context.get("formattedContext", "")
+
     # Build context string
-    context_info = f"""
+    if formatted_context:
+        context_info = formatted_context
+    else:
+        # Fallback to basic context
+        context_info = f"""
 Current Selection:
 - Active cell: {active_cell}
 - Selected range: {selected_range or 'None'}
@@ -11744,22 +11758,63 @@ Spreadsheet Info:
 - Total rows: {total_rows}
 - Total columns: {total_cols}
 """
+        if headers:
+            context_info += f"\nColumn Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:26])])}"
 
-    if headers:
-        context_info += f"\nColumn Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:20])])}"
+        # Add column insights if available
+        if columns_info:
+            context_info += "\n\n### Column Analysis:\n"
+            for col_letter, col_data in list(columns_info.items())[:10]:
+                col_type = col_data.get("type", "unknown")
+                stats = col_data.get("statistics", {})
+                unique_vals = col_data.get("uniqueValues", [])[:5]
+                col_idx = ord(col_letter) - 65
+                header_name = headers[col_idx] if col_idx < len(headers) else col_letter
 
-    if rows:
-        context_info += f"\n\nSample Data (first {min(10, len(rows))} rows):\n"
-        for idx, row in enumerate(rows[:10]):
-            row_data = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(row) if v])
-            if row_data:
-                context_info += f"Row {idx + 2}: {row_data}\n"
+                context_info += f"- Column {col_letter} ({header_name}): type={col_type}"
+                if col_type == "number" and stats:
+                    context_info += f", sum={stats.get('sum', 0):.2f}, avg={stats.get('avg', 0):.2f}"
+                if unique_vals:
+                    context_info += f", values: {unique_vals}"
+                context_info += "\n"
 
-    return f"""You are a spreadsheet AI assistant. Based on user requests, analyze the data and return actions to perform on the spreadsheet.
+        # Add data quality insights
+        if duplicate_rows:
+            context_info += f"\n⚠️ Found {len(duplicate_rows)} duplicate rows"
+        if empty_rows:
+            context_info += f"\n⚠️ Found {len(empty_rows)} empty rows"
 
-Available actions you can return:
+        if rows:
+            context_info += f"\n\n### Sample Data ({min(15, len(rows))} rows shown):\n"
+            for idx, row in enumerate(rows[:15]):
+                row_data = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(row) if v])
+                if row_data:
+                    context_info += f"Row {idx + 2}: {row_data}\n"
+
+        # Add relevant rows for query-specific context
+        if relevant_rows:
+            context_info += f"\n\n### Rows Matching Query:\n"
+            for item in relevant_rows[:5]:
+                row_num = item.get("row", 0)
+                data = item.get("data", [])
+                reason = item.get("reason", "")
+                row_str = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(data) if v])
+                context_info += f"Row {row_num}: {row_str} ({reason})\n"
+
+    return f"""You are a powerful spreadsheet AI assistant that can directly manipulate data AND answer questions about the data.
+
+## ANSWERING QUESTIONS
+For questions like "how many", "count", "what is", "total", etc.:
+- ANALYZE the data provided in the context
+- DIRECTLY ANSWER the question in the message field
+- Only use actions if the user explicitly asks to add a formula or modify the spreadsheet
+- Example: "How many males are there?" → Count from the data and say "There are 25 males in the data."
+
+## AVAILABLE ACTIONS (only use when modifying the spreadsheet is requested):
 - SET_CELL_VALUE: Set a cell's value {{ "type": "SET_CELL_VALUE", "params": {{ "cell": "A1", "value": "text or number" }} }}
 - SET_CELL_FORMULA: Set a cell's formula {{ "type": "SET_CELL_FORMULA", "params": {{ "cell": "A1", "formula": "=SUM(B1:B10)" }} }}
+  - Supported formulas: SUM, AVERAGE, COUNT, COUNTA, COUNTIF, MAX, MIN, basic arithmetic (+,-,*,/)
+  - COUNTIF example: =COUNTIF(D1:D100, "Female") - ALWAYS use specific ranges like D1:D100, NOT D:D
 - SET_RANGE_VALUES: Set multiple cells {{ "type": "SET_RANGE_VALUES", "params": {{ "startCell": "A1", "values": [["a", "b"], ["c", "d"]] }} }}
 - CLEAR_CELLS: Clear cells {{ "type": "CLEAR_CELLS", "params": {{ "range": "A1:B10" }} }}
 - FORMAT_CELLS: Apply formatting {{ "type": "FORMAT_CELLS", "params": {{ "range": "A1:B10", "format": {{ "bold": true, "backgroundColor": "#FFFF00" }} }} }}
@@ -11768,16 +11823,19 @@ Available actions you can return:
 - DELETE_ROW: Delete rows {{ "type": "DELETE_ROW", "params": {{ "row": 5, "count": 1 }} }}
 - DELETE_COLUMN: Delete columns {{ "type": "DELETE_COLUMN", "params": {{ "col": 2, "count": 1 }} }}
 - SORT_RANGE: Sort data {{ "type": "SORT_RANGE", "params": {{ "range": "A1:D10", "column": 0, "ascending": true }} }}
+- FIND_REPLACE: Find and replace values {{ "type": "FIND_REPLACE", "params": {{ "find": "Male", "replace": "Female", "range": "D1:D100" }} }}
+  - range is optional (defaults to entire sheet)
+  - matchCase is optional (defaults to false for case-insensitive matching)
 
 IMPORTANT: Always respond with valid JSON in this exact format:
 {{
-  "message": "Brief explanation of what you're doing",
-  "actions": [
-    {{ "type": "ACTION_TYPE", "params": {{ ... }} }}
-  ]
+  "message": "Your answer or explanation here",
+  "actions": []
 }}
 
-If you cannot perform the requested action or need clarification, return an empty actions array and explain in the message.
+- For QUESTIONS: Answer directly in message, leave actions empty
+- For COMMANDS (add, modify, format, etc.): Explain briefly in message, include actions
+- If you cannot help, explain in the message with empty actions
 
 {context_info}
 """
@@ -11829,11 +11887,287 @@ If you cannot perform the requested action or need clarification, return an empt
 """
 
 
+# ============================================================================
+# AGENT MODE - Multi-step autonomous agent for complex tasks
+# ============================================================================
+
+@app.route("/api/copilot/agent", methods=["POST", "OPTIONS"])
+def copilot_agent():
+    """
+    Agent mode endpoint for multi-step autonomous task execution.
+    Runs an observe → think → act loop until the goal is achieved.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI service is not available"}), 503
+
+    try:
+        from vertexai.generative_models import GenerativeModel, SafetySetting
+
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        message = data.get("message")
+        workspace_type = data.get("workspaceType", "spreadsheet")
+        context = data.get("context", {})
+        max_iterations = min(data.get("maxIterations", 10), 15)  # Cap at 15
+
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+
+        print(f"🤖 Agent Mode Request: type={workspace_type}, goal='{message[:100]}...', max_iterations={max_iterations}")
+
+        # Build agent system prompt
+        agent_prompt = get_agent_system_prompt(workspace_type, context)
+
+        # Initialize Gemini model
+        model = GenerativeModel("gemini-2.0-flash")
+        generation_config = {
+            "temperature": 0.3,
+            "max_output_tokens": 4096,
+            "top_p": 0.8,
+            "response_mime_type": "application/json",
+        }
+        safety_settings = [
+            SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        ]
+
+        # Run agent loop
+        session_id = f"agent-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        actions_executed = []
+        iteration = 0
+        goal_achieved = False
+        final_message = ""
+
+        while iteration < max_iterations and not goal_achieved:
+            iteration += 1
+            print(f"🔄 Agent iteration {iteration}/{max_iterations}")
+
+            # Build the think prompt
+            previous_actions_str = ""
+            if actions_executed:
+                previous_actions_str = "\n### Previous Actions:\n" + "\n".join([
+                    f"- [{a['result']}] {a['type']}: {a.get('description', '')}"
+                    for a in actions_executed
+                ])
+
+            think_prompt = f"""{agent_prompt}
+
+## User's Goal
+{message}
+
+{previous_actions_str}
+
+## Your Task (Iteration {iteration}/{max_iterations})
+Analyze the current state and decide:
+1. Is the goal achieved? (yes/no)
+2. If no, what's the next action to take?
+3. Provide your reasoning.
+
+Respond in JSON:
+{{
+  "goalAchieved": boolean,
+  "reasoning": "string explaining your thought process",
+  "nextAction": {{
+    "type": "ACTION_TYPE",
+    "params": {{ ... }},
+    "description": "human readable description"
+  }} | null,
+  "summary": "string - only if goalAchieved is true"
+}}
+"""
+
+            # Generate decision
+            response = model.generate_content(
+                think_prompt,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+
+            try:
+                decision = json.loads(response.text)
+            except json.JSONDecodeError:
+                print(f"❌ Agent failed to parse decision: {response.text[:200]}")
+                break
+
+            print(f"📝 Agent decision: goalAchieved={decision.get('goalAchieved')}, nextAction={decision.get('nextAction', {}).get('type') if decision.get('nextAction') else None}")
+
+            # Check if goal achieved
+            if decision.get("goalAchieved", False):
+                goal_achieved = True
+                final_message = decision.get("summary", "Goal achieved successfully.")
+                break
+
+            # Execute the next action
+            next_action = decision.get("nextAction")
+            if not next_action:
+                print("⚠️ No next action returned, ending loop")
+                break
+
+            action_record = {
+                "type": next_action.get("type"),
+                "params": next_action.get("params", {}),
+                "description": next_action.get("description", ""),
+                "result": "success",  # Frontend will actually execute
+                "iteration": iteration
+            }
+            actions_executed.append(action_record)
+
+        # Build final response
+        result = {
+            "message": final_message if goal_achieved else f"Completed {iteration} iterations with {len(actions_executed)} actions.",
+            "actions": [{"type": a["type"], "params": a["params"]} for a in actions_executed],
+            "agentResult": {
+                "sessionId": session_id,
+                "goalAchieved": goal_achieved,
+                "iterations": iteration,
+                "actionsExecuted": actions_executed
+            }
+        }
+
+        print(f"✅ Agent completed: goalAchieved={goal_achieved}, iterations={iteration}, actions={len(actions_executed)}")
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"❌ Agent error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"Agent processing failed: {str(e)}",
+            "message": "Sorry, the agent encountered an error.",
+            "actions": [],
+            "agentResult": {
+                "goalAchieved": False,
+                "iterations": 0,
+                "actionsExecuted": []
+            }
+        }), 500
+
+
+def get_agent_system_prompt(workspace_type: str, context: dict) -> str:
+    """Generate system prompt for agent mode with tool definitions"""
+
+    # Get base context
+    if workspace_type == "spreadsheet":
+        base_context = get_spreadsheet_context_string(context)
+        tools_section = """
+## Available Tools
+
+### READ TOOLS
+- GET_CELL: Get value of a specific cell { "type": "GET_CELL", "params": { "cell": "A1" } }
+- SEARCH: Search for a value { "type": "SEARCH", "params": { "query": "text", "column": "A" } }
+- COUNT_IF: Count cells matching condition { "type": "COUNT_IF", "params": { "range": "A1:A100", "condition": "value" } }
+
+### WRITE TOOLS
+- SET_CELL_VALUE: Set a cell's value { "type": "SET_CELL_VALUE", "params": { "cell": "A1", "value": "text" } }
+- SET_CELL_FORMULA: Set a formula { "type": "SET_CELL_FORMULA", "params": { "cell": "A1", "formula": "=SUM(B1:B10)" } }
+- SET_RANGE_VALUES: Set multiple cells { "type": "SET_RANGE_VALUES", "params": { "startCell": "A1", "values": [["a", "b"]] } }
+- CLEAR_CELLS: Clear cells { "type": "CLEAR_CELLS", "params": { "range": "A1:B10" } }
+
+### STRUCTURE TOOLS
+- INSERT_ROW: Insert rows { "type": "INSERT_ROW", "params": { "afterRow": 5, "count": 1 } }
+- DELETE_ROW: Delete rows { "type": "DELETE_ROW", "params": { "row": 5, "count": 1 } }
+- SORT_RANGE: Sort data { "type": "SORT_RANGE", "params": { "column": 0, "ascending": true } }
+
+### FORMAT TOOLS
+- FORMAT_CELLS: Apply formatting { "type": "FORMAT_CELLS", "params": { "range": "A1:B10", "format": { "bold": true } } }
+
+### DATA TOOLS
+- FIND_REPLACE: Find and replace { "type": "FIND_REPLACE", "params": { "find": "old", "replace": "new" } }
+- REMOVE_DUPLICATES: Remove duplicate rows { "type": "REMOVE_DUPLICATES", "params": { "column": "A" } }
+"""
+    else:
+        base_context = get_document_context_string(context)
+        tools_section = """
+## Available Tools
+
+### WRITE TOOLS
+- INSERT_TEXT: Insert text { "type": "INSERT_TEXT", "params": { "text": "content", "position": "cursor" } }
+- REPLACE_SELECTION: Replace selected text { "type": "REPLACE_SELECTION", "params": { "text": "new text" } }
+- DELETE_SELECTION: Delete selected text { "type": "DELETE_SELECTION", "params": {} }
+
+### FORMAT TOOLS
+- FORMAT_SELECTION: Apply formatting { "type": "FORMAT_SELECTION", "params": { "bold": true, "italic": false } }
+- SET_HEADING: Set heading level { "type": "SET_HEADING", "params": { "level": 1 } }
+
+### STRUCTURE TOOLS
+- CREATE_LIST: Create a list { "type": "CREATE_LIST", "params": { "type": "bullet", "items": ["item1", "item2"] } }
+- INSERT_TABLE: Insert table { "type": "INSERT_TABLE", "params": { "rows": 3, "cols": 3, "data": [["a", "b", "c"]] } }
+- INSERT_LINK: Insert hyperlink { "type": "INSERT_LINK", "params": { "text": "link", "url": "https://..." } }
+"""
+
+    return f"""You are an autonomous AI agent for {workspace_type} editing. You work in an observe → think → act loop to achieve the user's goal.
+
+{tools_section}
+
+## Current Context
+{base_context}
+
+## Guidelines
+1. Break complex tasks into small steps - one action at a time
+2. Verify your actions are working before moving to the next step
+3. If an action fails, try a different approach
+4. Don't repeat actions that already succeeded
+5. Mark goalAchieved=true ONLY when the user's goal is fully accomplished
+6. Be efficient - complete the task in as few iterations as possible
+"""
+
+
+def get_spreadsheet_context_string(context: dict) -> str:
+    """Extract spreadsheet context as a string for agent mode"""
+    formatted_context = context.get("formattedContext", "")
+    if formatted_context:
+        return formatted_context
+
+    # Fallback to basic context
+    active_cell = context.get("activeCell", "A1")
+    selected_range = context.get("selectedRange", "")
+    sheet_data = context.get("sheetData", {})
+    headers = sheet_data.get("headers", [])
+    total_rows = sheet_data.get("totalRows", 0)
+
+    context_str = f"""
+Active cell: {active_cell}
+Selected range: {selected_range or 'None'}
+Total rows: {total_rows}
+"""
+    if headers:
+        context_str += f"Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:10])])}\n"
+
+    return context_str
+
+
+def get_document_context_string(context: dict) -> str:
+    """Extract document context as a string for agent mode"""
+    formatted_context = context.get("formattedContext", "")
+    if formatted_context:
+        return formatted_context
+
+    selected_text = context.get("selectedText", "")
+    document_content = context.get("documentContent", "")
+
+    context_str = ""
+    if selected_text:
+        context_str += f"Selected text: \"{selected_text[:200]}{'...' if len(selected_text) > 200 else ''}\"\n"
+    if document_content:
+        context_str += f"Document preview: {document_content[:500]}{'...' if len(document_content) > 500 else ''}\n"
+        context_str += f"Total length: {len(document_content)} characters\n"
+
+    return context_str
+
+
 # Keep-alive service for Render server
 def keep_alive_service():
     """Background service that pings the server to keep it alive"""
     global keep_alive_running
-    
+
     # Get configuration
     interval = int(os.environ.get("KEEP_ALIVE_INTERVAL", "840"))  # 14 minutes default
     port = int(os.environ.get("PORT", "8002"))
