@@ -11636,6 +11636,199 @@ def extract_requirements_v3():
         }), 500
 
 
+# ============================================================================
+# WORKSPACE AI - Action-based AI for Document/Spreadsheet Editors
+# ============================================================================
+
+@app.route("/api/workspace-ai", methods=["POST", "OPTIONS"])
+def workspace_ai():
+    """
+    Workspace AI endpoint for document and spreadsheet editors.
+    Uses Gemini to analyze user requests and return executable actions.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    if not VERTEX_AVAILABLE:
+        return jsonify({"error": "AI service is not available"}), 503
+
+    try:
+        from vertexai.generative_models import GenerativeModel, SafetySetting
+
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        message = data.get("message")
+        workspace_type = data.get("workspaceType", "document")  # 'document' or 'spreadsheet'
+        context = data.get("context", {})
+
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+
+        print(f"🤖 Workspace AI Request: type={workspace_type}, message='{message[:100]}...'")
+
+        # Build system prompt based on workspace type
+        if workspace_type == "spreadsheet":
+            system_prompt = get_spreadsheet_system_prompt(context)
+        else:
+            system_prompt = get_document_system_prompt(context)
+
+        # Initialize Gemini model
+        model = GenerativeModel("gemini-2.0-flash")
+        generation_config = {
+            "temperature": 0.2,
+            "max_output_tokens": 4096,
+            "top_p": 0.8,
+            "response_mime_type": "application/json",
+        }
+        safety_settings = [
+            SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        ]
+
+        # Generate response
+        full_prompt = f"{system_prompt}\n\nUser Request: {message}"
+        response = model.generate_content(
+            full_prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+
+        # Parse JSON response
+        try:
+            result = json.loads(response.text)
+        except json.JSONDecodeError:
+            # If response isn't valid JSON, wrap it
+            result = {
+                "message": response.text,
+                "actions": []
+            }
+
+        print(f"✅ Workspace AI Response: {len(result.get('actions', []))} actions")
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"❌ Workspace AI error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"AI processing failed: {str(e)}",
+            "message": "Sorry, I encountered an error processing your request.",
+            "actions": []
+        }), 500
+
+
+def get_spreadsheet_system_prompt(context: dict) -> str:
+    """Generate system prompt for spreadsheet AI"""
+
+    # Extract context info
+    active_cell = context.get("activeCell", "A1")
+    selected_range = context.get("selectedRange", "")
+    sheet_data = context.get("sheetData", {})
+    headers = sheet_data.get("headers", [])
+    rows = sheet_data.get("rows", [])
+    total_rows = sheet_data.get("totalRows", 0)
+    total_cols = sheet_data.get("totalCols", 0)
+
+    # Build context string
+    context_info = f"""
+Current Selection:
+- Active cell: {active_cell}
+- Selected range: {selected_range or 'None'}
+
+Spreadsheet Info:
+- Total rows: {total_rows}
+- Total columns: {total_cols}
+"""
+
+    if headers:
+        context_info += f"\nColumn Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:20])])}"
+
+    if rows:
+        context_info += f"\n\nSample Data (first {min(10, len(rows))} rows):\n"
+        for idx, row in enumerate(rows[:10]):
+            row_data = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(row) if v])
+            if row_data:
+                context_info += f"Row {idx + 2}: {row_data}\n"
+
+    return f"""You are a spreadsheet AI assistant. Based on user requests, analyze the data and return actions to perform on the spreadsheet.
+
+Available actions you can return:
+- SET_CELL_VALUE: Set a cell's value {{ "type": "SET_CELL_VALUE", "params": {{ "cell": "A1", "value": "text or number" }} }}
+- SET_CELL_FORMULA: Set a cell's formula {{ "type": "SET_CELL_FORMULA", "params": {{ "cell": "A1", "formula": "=SUM(B1:B10)" }} }}
+- SET_RANGE_VALUES: Set multiple cells {{ "type": "SET_RANGE_VALUES", "params": {{ "startCell": "A1", "values": [["a", "b"], ["c", "d"]] }} }}
+- CLEAR_CELLS: Clear cells {{ "type": "CLEAR_CELLS", "params": {{ "range": "A1:B10" }} }}
+- FORMAT_CELLS: Apply formatting {{ "type": "FORMAT_CELLS", "params": {{ "range": "A1:B10", "format": {{ "bold": true, "backgroundColor": "#FFFF00" }} }} }}
+- INSERT_ROW: Insert rows {{ "type": "INSERT_ROW", "params": {{ "afterRow": 5, "count": 1 }} }}
+- INSERT_COLUMN: Insert columns {{ "type": "INSERT_COLUMN", "params": {{ "afterCol": 2, "count": 1 }} }}
+- DELETE_ROW: Delete rows {{ "type": "DELETE_ROW", "params": {{ "row": 5, "count": 1 }} }}
+- DELETE_COLUMN: Delete columns {{ "type": "DELETE_COLUMN", "params": {{ "col": 2, "count": 1 }} }}
+- SORT_RANGE: Sort data {{ "type": "SORT_RANGE", "params": {{ "range": "A1:D10", "column": 0, "ascending": true }} }}
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{{
+  "message": "Brief explanation of what you're doing",
+  "actions": [
+    {{ "type": "ACTION_TYPE", "params": {{ ... }} }}
+  ]
+}}
+
+If you cannot perform the requested action or need clarification, return an empty actions array and explain in the message.
+
+{context_info}
+"""
+
+
+def get_document_system_prompt(context: dict) -> str:
+    """Generate system prompt for document AI"""
+
+    # Extract context info
+    selected_text = context.get("selectedText", "")
+    document_content = context.get("documentContent", "")
+
+    context_info = ""
+    if selected_text:
+        context_info += f"\nSelected Text:\n\"{selected_text[:500]}{'...' if len(selected_text) > 500 else ''}\""
+
+    if document_content:
+        preview = document_content[:1000]
+        context_info += f"\n\nDocument Preview:\n{preview}{'...' if len(document_content) > 1000 else ''}"
+        context_info += f"\n\n(Total document length: {len(document_content)} characters)"
+
+    return f"""You are a document AI assistant. Based on user requests, analyze the content and return actions to perform on the document.
+
+Available actions you can return:
+- INSERT_TEXT: Insert text {{ "type": "INSERT_TEXT", "params": {{ "text": "content to insert", "position": "cursor" }} }}
+  - position can be: "cursor", "start", "end"
+- REPLACE_SELECTION: Replace selected text {{ "type": "REPLACE_SELECTION", "params": {{ "text": "replacement text" }} }}
+- DELETE_SELECTION: Delete selected text {{ "type": "DELETE_SELECTION", "params": {{}} }}
+- FORMAT_SELECTION: Apply formatting {{ "type": "FORMAT_SELECTION", "params": {{ "bold": true, "italic": false, "underline": false }} }}
+- SET_HEADING: Convert to heading {{ "type": "SET_HEADING", "params": {{ "level": 1 }} }}
+  - level can be: 1, 2, or 3
+- CREATE_LIST: Create a list {{ "type": "CREATE_LIST", "params": {{ "type": "bullet", "items": ["item 1", "item 2"] }} }}
+  - type can be: "bullet" or "numbered"
+- INSERT_TABLE: Insert table {{ "type": "INSERT_TABLE", "params": {{ "rows": 3, "cols": 3, "data": [["a", "b", "c"], ["d", "e", "f"]] }} }}
+- INSERT_LINK: Insert hyperlink {{ "type": "INSERT_LINK", "params": {{ "text": "link text", "url": "https://example.com" }} }}
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{{
+  "message": "Brief explanation of what you're doing",
+  "actions": [
+    {{ "type": "ACTION_TYPE", "params": {{ ... }} }}
+  ]
+}}
+
+For writing tasks (continue writing, summarize, rewrite, etc.), use INSERT_TEXT or REPLACE_SELECTION with the generated content.
+If you cannot perform the requested action or need clarification, return an empty actions array and explain in the message.
+
+{context_info}
+"""
+
+
 # Keep-alive service for Render server
 def keep_alive_service():
     """Background service that pings the server to keep it alive"""
