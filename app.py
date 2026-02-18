@@ -11644,16 +11644,16 @@ def extract_requirements_v3():
 def workspace_ai():
     """
     Workspace AI endpoint for document and spreadsheet editors.
-    Uses Gemini to analyze user requests and return executable actions.
+    Uses Claude via AWS Bedrock to analyze user requests and return executable actions.
     """
     if request.method == "OPTIONS":
         return "", 200
 
-    if not VERTEX_AVAILABLE:
-        return jsonify({"error": "AI service is not available"}), 503
-
     try:
-        from vertexai.generative_models import GenerativeModel, SafetySetting
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available (Bedrock not configured)"}), 503
 
         data = request.get_json(silent=True)
         if not data:
@@ -11674,38 +11674,23 @@ def workspace_ai():
         else:
             system_prompt = get_document_system_prompt(context)
 
-        # Initialize Gemini model
-        model = GenerativeModel("gemini-2.0-flash")
-        generation_config = {
-            "temperature": 0.2,
-            "max_output_tokens": 4096,
-            "top_p": 0.8,
-            "response_mime_type": "application/json",
-        }
-        safety_settings = [
-            SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-        ]
+        # Initialize Claude via Bedrock
+        claude = BedrockClaude()
 
         # Generate response
         full_prompt = f"{system_prompt}\n\nUser Request: {message}"
-        response = model.generate_content(
-            full_prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings
+        result = claude.call_claude(
+            prompt=full_prompt,
+            max_tokens=4096,
+            temperature=0.2,
+            response_format="json"
         )
 
-        # Parse JSON response
-        try:
-            result = json.loads(response.text)
-        except json.JSONDecodeError:
-            # If response isn't valid JSON, wrap it
-            result = {
-                "message": response.text,
-                "actions": []
-            }
+        # Ensure result has expected structure
+        if "message" not in result:
+            result["message"] = "Request processed successfully."
+        if "actions" not in result:
+            result["actions"] = []
 
         print(f"✅ Workspace AI Response: {len(result.get('actions', []))} actions")
 
@@ -11895,16 +11880,16 @@ If you cannot perform the requested action or need clarification, return an empt
 def copilot_agent():
     """
     Agent mode endpoint for multi-step autonomous task execution.
-    Runs an observe → think → act loop until the goal is achieved.
+    Uses Claude via AWS Bedrock. Runs an observe → think → act loop until the goal is achieved.
     """
     if request.method == "OPTIONS":
         return "", 200
 
-    if not VERTEX_AVAILABLE:
-        return jsonify({"error": "AI service is not available"}), 503
-
     try:
-        from vertexai.generative_models import GenerativeModel, SafetySetting
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available (Bedrock not configured)"}), 503
 
         data = request.get_json(silent=True)
         if not data:
@@ -11923,20 +11908,8 @@ def copilot_agent():
         # Build agent system prompt
         agent_prompt = get_agent_system_prompt(workspace_type, context)
 
-        # Initialize Gemini model
-        model = GenerativeModel("gemini-2.0-flash")
-        generation_config = {
-            "temperature": 0.3,
-            "max_output_tokens": 4096,
-            "top_p": 0.8,
-            "response_mime_type": "application/json",
-        }
-        safety_settings = [
-            SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-        ]
+        # Initialize Claude via Bedrock
+        claude = BedrockClaude()
 
         # Run agent loop
         session_id = f"agent-{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -11983,17 +11956,16 @@ Respond in JSON:
 }}
 """
 
-            # Generate decision
-            response = model.generate_content(
-                think_prompt,
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
-
+            # Generate decision using Claude
             try:
-                decision = json.loads(response.text)
-            except json.JSONDecodeError:
-                print(f"❌ Agent failed to parse decision: {response.text[:200]}")
+                decision = claude.call_claude(
+                    prompt=think_prompt,
+                    max_tokens=4096,
+                    temperature=0.3,
+                    response_format="json"
+                )
+            except Exception as e:
+                print(f"❌ Agent failed to get decision from Claude: {str(e)}")
                 break
 
             print(f"📝 Agent decision: goalAchieved={decision.get('goalAchieved')}, nextAction={decision.get('nextAction', {}).get('type') if decision.get('nextAction') else None}")

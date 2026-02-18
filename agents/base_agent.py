@@ -1,6 +1,7 @@
 """
 Base Agent Class for RFP Extraction Agents
 All agents inherit from this and implement extract() method
+Uses AWS Bedrock (Claude) for AI processing
 """
 
 import os
@@ -13,8 +14,9 @@ from datetime import datetime
 
 from google.cloud import storage
 from google.oauth2 import service_account
-from google.api_core.exceptions import ResourceExhausted
-from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+
+# Import Bedrock client
+from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
 
 # For docx conversion
 try:
@@ -25,29 +27,19 @@ except ImportError:
 
 
 class BaseExtractionAgent(ABC):
-    """Base class for all extraction agents"""
+    """Base class for all extraction agents - uses AWS Bedrock (Claude)"""
 
     # Agent configuration
     AGENT_TYPE: str = "BASE"
     MAX_ITEMS: Optional[int] = None
-    MODEL_NAME: str = "gemini-2.5-flash-lite"  # Using 2.5-flash-lite for better rate limits
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 5  # seconds
 
     def __init__(self):
-        self.model = GenerativeModel(self.MODEL_NAME)
-        self.generation_config = {
-            "temperature": 0.2,
-            "max_output_tokens": 32768,  # Higher limit for complex RFPs (max is 65535)
-            "top_p": 0.8,
-            "response_mime_type": "application/json",
-        }
-        self.safety_settings = [
-            SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-        ]
+        # Initialize Bedrock Claude client
+        self.claude = BedrockClaude()
+        self.max_tokens = 32768  # Higher limit for complex RFPs
+        self.temperature = 0.2
 
     @abstractmethod
     def get_prompt(self) -> str:
@@ -85,8 +77,8 @@ class BaseExtractionAgent(ABC):
                     "agent_type": self.AGENT_TYPE,
                 }
 
-            # Call Gemini with the agent's prompt
-            result = self._call_gemini(files_data)
+            # Call Claude with the agent's prompt
+            result = self._call_claude(files_data)
 
             # Validate and clean the result
             validated_result = self.validate_result(result)
@@ -171,105 +163,28 @@ class BaseExtractionAgent(ABC):
                 return storage.Client(credentials=credentials)
             return storage.Client()
 
-    def _call_gemini(self, files_data: List[Tuple[bytes, str]]) -> Dict[str, Any]:
-        """Call Gemini API with the agent's prompt and files"""
-        parts = []
-
-        # Add the agent's prompt
+    def _call_claude(self, files_data: List[Tuple[bytes, str]]) -> Dict[str, Any]:
+        """Call Claude API via AWS Bedrock with the agent's prompt and files"""
         prompt = self.get_prompt()
-        parts.append(Part.from_text(prompt))
 
-        # MIME type mapping
-        mime_mapping = {
-            "pdf": "application/pdf",
-            "txt": "text/plain",
-            "csv": "text/csv",
-            "json": "application/json",
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "gif": "image/gif",
-            "webp": "image/webp"
-        }
-
-        # Add files
-        for file_bytes, filename in files_data:
-            file_ext = os.path.splitext(filename)[1].lower().lstrip('.')
-
-            # Handle DOCX files
-            if file_ext == "docx" and DOCX_AVAILABLE:
-                try:
-                    extracted_text = self._extract_text_from_docx(file_bytes)
-                    parts.append(Part.from_text(f"\n\n--- Document: {filename} ---\n\n{extracted_text}"))
-                    continue
-                except Exception as e:
-                    print(f"⚠️ [{self.AGENT_TYPE}] Could not extract text from {filename}: {e}")
-
-            if file_ext == "doc":
-                parts.append(Part.from_text(f"\n\n--- Document: {filename} (Unable to process .doc format) ---\n\n"))
-                continue
-
-            # For supported formats
-            mime_type = mime_mapping.get(file_ext, "application/octet-stream")
-
-            if mime_type == "application/octet-stream":
-                print(f"⚠️ [{self.AGENT_TYPE}] Unsupported file type: {filename}")
-                continue
-
-            file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
-            parts.append(file_part)
-            parts.append(Part.from_text(f"\n\n--- End of document: {filename} ---\n\n"))
-
-        print(f"🤖 [{self.AGENT_TYPE}] Sending request to Gemini ({len(files_data)} files)...")
-
-        # Retry logic for rate limiting
-        response = None
-        last_error = None
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                response = self.model.generate_content(
-                    parts,
-                    generation_config=self.generation_config,
-                    safety_settings=self.safety_settings,
-                    stream=False
-                )
-                break  # Success, exit retry loop
-            except ResourceExhausted as e:
-                last_error = e
-                if attempt < self.MAX_RETRIES - 1:
-                    wait_time = self.RETRY_DELAY * (2 ** attempt)  # Exponential backoff
-                    print(f"⚠️ [{self.AGENT_TYPE}] Rate limited (attempt {attempt + 1}/{self.MAX_RETRIES}). Waiting {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"❌ [{self.AGENT_TYPE}] Rate limit exceeded after {self.MAX_RETRIES} attempts")
-                    raise last_error
-
-        if response is None:
-            raise last_error or Exception("Failed to get response from Gemini")
-
-        # Parse response
-        response_text = response.text.strip()
-
-        # Clean up markdown code blocks
-        if response_text.startswith('```json'):
-            response_text = response_text[7:]
-        if response_text.startswith('```'):
-            response_text = response_text[3:]
-        if response_text.endswith('```'):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
-
-        # Sanitize control characters in JSON strings
-        response_text = self._sanitize_json_string(response_text)
+        print(f"🤖 [{self.AGENT_TYPE}] Sending request to Claude via Bedrock ({len(files_data)} files)...")
 
         try:
-            result = json.loads(response_text)
-        except json.JSONDecodeError as e:
-            print(f"⚠️ [{self.AGENT_TYPE}] JSON parse error: {e}. Attempting repair...")
-            result = self._repair_truncated_json(response_text)
+            # Use the Bedrock client's document handling
+            result = self.claude.call_claude_with_documents(
+                prompt=prompt,
+                documents=files_data,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                response_format="json"
+            )
 
-        print(f"✅ [{self.AGENT_TYPE}] Successfully parsed response")
-        return result
+            print(f"✅ [{self.AGENT_TYPE}] Successfully parsed response from Claude")
+            return result
+
+        except Exception as e:
+            print(f"❌ [{self.AGENT_TYPE}] Claude API error: {e}")
+            raise
 
     def _sanitize_json_string(self, json_text: str) -> str:
         """
