@@ -30,12 +30,22 @@ def init_bedrock_client():
 
     try:
         region = os.environ.get("AWS_REGION", "us-east-1")
-        bedrock_client = boto3.client(
-            'bedrock-runtime',
-            region_name=region,
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY")
-        )
+
+        # Build client kwargs - only include credentials if explicitly set
+        # This allows boto3 to use ~/.aws/credentials file as fallback
+        client_kwargs = {
+            'service_name': 'bedrock-runtime',
+            'region_name': region
+        }
+
+        # Only pass credentials if environment variables are set
+        access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        if access_key and secret_key:
+            client_kwargs['aws_access_key_id'] = access_key
+            client_kwargs['aws_secret_access_key'] = secret_key
+
+        bedrock_client = boto3.client(**client_kwargs)
         print(f"✅ Bedrock client initialized (region: {region})")
         return bedrock_client
     except Exception as e:
@@ -56,8 +66,8 @@ class BedrockClaude:
     """Claude AI client using AWS Bedrock"""
 
     # Model IDs
-    CLAUDE_SONNET = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-    CLAUDE_HAIKU = "anthropic.claude-3-haiku-20240307-v1:0"
+    CLAUDE_SONNET = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    CLAUDE_HAIKU = "us.anthropic.claude-3-haiku-20240307-v1:0"
 
     def __init__(self, model_id: str = None):
         self.client = get_bedrock_client()
