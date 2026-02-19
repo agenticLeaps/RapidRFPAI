@@ -16,6 +16,7 @@ bedrock_client = None
 try:
     import boto3
     from botocore.exceptions import ClientError
+    from botocore.config import Config
     BEDROCK_AVAILABLE = True
 except ImportError:
     print("⚠️ boto3 not installed. Bedrock features will be unavailable.")
@@ -31,11 +32,19 @@ def init_bedrock_client():
     try:
         region = os.environ.get("AWS_REGION", "us-east-1")
 
+        # Configure longer timeout for large Claude extractions (5 minutes)
+        bedrock_config = Config(
+            read_timeout=300,
+            connect_timeout=30,
+            retries={'max_attempts': 3}
+        )
+
         # Build client kwargs - only include credentials if explicitly set
         # This allows boto3 to use ~/.aws/credentials file as fallback
         client_kwargs = {
             'service_name': 'bedrock-runtime',
-            'region_name': region
+            'region_name': region,
+            'config': bedrock_config
         }
 
         # Only pass credentials if environment variables are set
