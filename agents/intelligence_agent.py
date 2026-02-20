@@ -11,12 +11,11 @@ This agent:
 
 RAG Integration:
 After extracting eligibility items from the RFP, this agent queries the
-Rapidrfpv2 RAG system to auto-verify each requirement against the company's
+NodeRAG system directly to auto-verify each requirement against the company's
 knowledge base (SDVOSB status, NAICS codes, certifications, past performance, etc.)
 """
 
 import os
-import requests
 import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -25,10 +24,10 @@ from .base_agent import BaseExtractionAgent
 
 class RAGVerificationClient:
     """
-    Client for querying the Rapidrfpv2 RAG system to verify eligibility requirements
+    Client for querying the NodeRAG system to verify eligibility requirements
     against company profile/knowledge base.
 
-    Uses the /api/v3/chat endpoint with orgId for RAG queries.
+    Uses NodeRAGClient directly for efficient in-process queries.
     """
 
     def __init__(self, service_url: str = None, org_id: str = None):
@@ -36,13 +35,21 @@ class RAGVerificationClient:
         Initialize RAG client.
 
         Args:
-            service_url: URL of the RapidRFPAI service (defaults to RAPIDRFP_SERVICE_URL env var)
+            service_url: Deprecated - no longer used (direct function calls)
             org_id: Organization ID for the company's knowledge base
         """
-        # Use self-reference for internal calls, or external URL
-        self.service_url = service_url or os.environ.get('RAPIDRFP_SERVICE_URL', 'https://rapidrfpai-1.onrender.com')
         self.org_id = org_id
-        self.timeout = 60  # seconds per request (increased for RAG processing)
+        self.noderag_client = None
+
+        # Initialize NodeRAG client
+        try:
+            from noderag_client import NodeRAGClient
+            self.noderag_client = NodeRAGClient()
+            print(f"✅ [RAG] NodeRAGClient initialized for direct queries")
+        except ImportError as e:
+            print(f"⚠️ [RAG] NodeRAGClient not available: {e}")
+        except Exception as e:
+            print(f"⚠️ [RAG] Error initializing NodeRAGClient: {e}")
 
     def verify_requirement(self, requirement_text: str) -> Dict[str, Any]:
         """
@@ -64,6 +71,16 @@ class RAGVerificationClient:
                 "sources": []
             }
 
+        if not self.noderag_client:
+            print("⚠️ [RAG] NodeRAG client not available, skipping verification")
+            return {
+                "verified": False,
+                "status": "PENDING",
+                "confidence": 0,
+                "explanation": "RAG service not available",
+                "sources": []
+            }
+
         try:
             # Formulate the verification query
             query = f"""Based on our company profile and capabilities, do we meet this RFP requirement?
@@ -78,49 +95,30 @@ Answer with ONE of these at the START of your response:
 
 Then explain your answer with specific evidence from our company profile."""
 
-            # Call the /api/v3/chat endpoint (same as working chat API)
-            response = requests.post(
-                f"{self.service_url}/api/v3/chat",
-                json={
-                    "query": query,
-                    "orgId": self.org_id,
-                    "ragversion": "v2"
-                },
-                headers={
-                    "Content-Type": "application/json"
-                },
-                timeout=self.timeout
+            # Call NodeRAG directly instead of HTTP request
+            result = self.noderag_client.generate_response(
+                query=query,
+                org_id=self.org_id,
+                top_k=5
             )
 
-            if response.status_code != 200:
-                print(f"⚠️ [RAG] API returned {response.status_code}: {response.text[:200]}")
-                return {
-                    "verified": False,
-                    "status": "PENDING",
-                    "confidence": 0,
-                    "explanation": f"RAG API error: {response.status_code}",
-                    "sources": []
-                }
-
-            result = response.json()
-
             # Handle error responses
-            if result.get("success") == False or result.get("error"):
+            if not result or result.get("error"):
+                print(f"⚠️ [RAG] NodeRAG error: {result.get('error', 'Unknown error')}")
                 return {
                     "verified": False,
                     "status": "PENDING",
                     "confidence": 0,
-                    "explanation": result.get("error", "Unknown RAG error"),
+                    "explanation": result.get("error", "RAG query failed"),
                     "sources": []
                 }
 
-            # Extract answer from response - handle both v1 and v2 formats
-            # v1: {"answer": "..."}
-            # v2 (NodeRAG): {"response": "...", "metadata": {"sources": [...], "confidence": 0.8}}
-            answer = result.get("answer", "") or result.get("response", "") or ""
+            # Extract answer from NodeRAG response
+            # NodeRAG returns: {"response": "...", "sources": [...], "metadata": {...}}
+            answer = result.get("response", "") or ""
             answer_upper = answer.upper()
 
-            # Get metadata from v2 response
+            # Get metadata from response
             metadata = result.get("metadata", {})
 
             # Get sources - check multiple locations
@@ -233,7 +231,7 @@ Then explain your answer with specific evidence from our company profile."""
                 "rag_confidence": confidence,  # Explicit field for confidence
             }
 
-        except requests.exceptions.Timeout:
+        except TimeoutError:
             print(f"⚠️ [RAG] Request timeout for requirement: {requirement_text[:50]}...")
             return {
                 "verified": False,

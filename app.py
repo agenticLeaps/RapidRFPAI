@@ -81,6 +81,7 @@ CORS(app, origins=[
     "https://backendprod-657352464140.us-central1.run.app",
     "https://carebackend-657352464140.us-central1.run.app",
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:5173"
 ],
      methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"],
@@ -2181,8 +2182,23 @@ def delete_collection(collection_ref, batch_size):
     
     return deleted_count
 
-def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global", rerank=False, enable_hybrid_search=True, dense_weight=0.7, sparse_weight=0.3, enable_query_expansion=True, max_query_variations=2, context_type="general"):
-    """Get context from knowledge base based on option (global or specific)"""
+def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global", rerank=False, enable_hybrid_search=True, dense_weight=0.7, sparse_weight=0.3, enable_query_expansion=True, max_query_variations=2, context_type="general", top_k=3):
+    """Get context from knowledge base based on option (global or specific)
+
+    Args:
+        query: Search query string
+        org_id: Organization ID
+        project_id: Project ID
+        knowledge_base_option: "global" or "specific"
+        rerank: Whether to apply reranking
+        enable_hybrid_search: Whether to use hybrid search
+        dense_weight: Weight for dense vectors in hybrid search
+        sparse_weight: Weight for sparse vectors in hybrid search
+        enable_query_expansion: Whether to expand queries
+        max_query_variations: Max query variations for expansion
+        context_type: Type of context (general, etc.)
+        top_k: Number of top results to return (default 3)
+    """
     try:
         # Get query embedding
         query_embedding = np.array(embed_query(query))
@@ -2278,18 +2294,18 @@ def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option=
                 
                 if rerank and enhanced_candidates:
                     print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
-                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=3)
+                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=top_k)
                 else:
-                    top_chunks = enhanced_candidates[:3]
-                    
+                    top_chunks = enhanced_candidates[:top_k]
+
             elif rerank:
                 print(f"🔄 Applying reranking to {len(retrieved_docs)} documents...")
-                # Get more candidates for reranking (top 10-15), then rerank to get top 3
+                # Get more candidates for reranking (top 10-15), then rerank to get top_k
                 similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:15]
-                top_chunks = rerank_documents(query, similarity_candidates, top_k=3)
+                top_chunks = rerank_documents(query, similarity_candidates, top_k=top_k)
             else:
                 # Use traditional similarity ranking
-                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]
+                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:top_k]
         else:
             top_chunks = []
         
@@ -11634,6 +11650,501 @@ def extract_requirements_v3():
             "error": f"Requirements extraction failed: {str(e)}",
             "agent_type": "REQUIREMENTS"
         }), 500
+
+
+# ============================================================================
+# REQUIREMENTS PLANNING & GENERATION - Claude-powered requirement completion
+# ============================================================================
+
+# In-memory conversation storage for planning sessions
+planning_conversations = {}
+planning_conv_lock = Lock()
+
+@app.route("/api/v3/requirements/plan", methods=["POST", "OPTIONS"])
+def create_requirement_plan():
+    """
+    Conversational planning for RFP requirements - Claude Code style.
+
+    Flow:
+    1. action='start': Analyze requirement, return understanding + questions (if any)
+    2. action='continue': Process user response, return more questions or final plan
+
+    Request:
+    {
+        "requirement": {...},
+        "projectId": str,
+        "companyName": str,
+        "orgId": str,
+        "action": "start" | "continue",
+        "conversationId": str (for continue),
+        "userResponse": str (for continue)
+    }
+
+    Response (start):
+    {
+        "success": true,
+        "conversationId": str,
+        "understanding": str,
+        "questions": [...] or null,
+        "plan": {...} or null (if no questions needed)
+    }
+
+    Response (continue):
+    {
+        "success": true,
+        "message": str,
+        "questions": [...] or null,
+        "plan": {...} or null
+    }
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available"}), 503
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement = data.get("requirement", {})
+        project_id = data.get("projectId", "")
+        company_name = data.get("companyName", "Your Company")
+        org_id = data.get("orgId", "")
+        action = data.get("action", "start")
+
+        if not requirement:
+            return jsonify({"error": "Requirement object is required"}), 400
+
+        print(f"📋 Requirements Plan: action={action}, requirement={requirement.get('name', 'Unknown')}, company={company_name}")
+
+        claude = BedrockClaude()
+
+        # Get KB context if org_id provided
+        kb_context = ""
+        if org_id:
+            try:
+                kb_result = get_knowledge_base_context(
+                    query=f"{requirement.get('name', '')} {requirement.get('description', '')}",
+                    org_id=org_id,
+                    project_id=project_id,
+                    knowledge_base_option="global",
+                    top_k=5
+                )
+                # get_knowledge_base_context returns a string directly
+                if kb_result and isinstance(kb_result, str):
+                    kb_context = kb_result[:2000]
+            except Exception as kb_err:
+                print(f"KB query failed: {kb_err}")
+
+        if action == "start":
+            # Generate conversation ID
+            import uuid
+            conversation_id = str(uuid.uuid4())
+
+            # System prompt for understanding + questions
+            system_prompt = f"""You are a proposal expert for {company_name} helping complete RFP requirements.
+
+Your task is to:
+1. First, explain what you understand from this requirement (be concise, 2-3 sentences)
+2. Then, if you have any doubts or need clarification, ask 2-4 specific questions
+3. If the requirement is clear enough, proceed directly to create a plan
+
+IMPORTANT:
+- Use the company's knowledge base context to inform your understanding
+- Only ask questions if genuinely needed - don't ask obvious questions
+- Questions should help you create more accurate, company-specific content
+
+Return JSON format:
+{{
+    "understanding": "Clear explanation of what this requirement asks for...",
+    "hasQuestions": true/false,
+    "questions": [
+        {{"question": "Specific question?", "reason": "Why this matters"}}
+    ],
+    "plan": null  // Only include if hasQuestions is false
+}}
+
+If hasQuestions is false, also include:
+{{
+    "understanding": "...",
+    "hasQuestions": false,
+    "questions": [],
+    "plan": {{
+        "summary": "Brief approach summary",
+        "sections": [
+            {{"name": "Section name", "description": "What goes here", "dataNeeded": ["data points"]}}
+        ]
+    }}
+}}"""
+
+            user_prompt = f"""Analyze this RFP requirement:
+
+REQUIREMENT:
+- Name: {requirement.get('name', 'Unknown')}
+- Description: {requirement.get('description', '')}
+- Template Type: {requirement.get('template_type', 'form')}
+- File Extension: {requirement.get('file_extension', 'document')}
+- Full Context: {requirement.get('full_context', requirement.get('source_text', ''))[:3000]}
+
+COMPANY KNOWLEDGE BASE CONTEXT:
+{kb_context if kb_context else "No specific company data available yet."}
+
+First explain your understanding, then decide if you need to ask questions or can proceed with a plan.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Store conversation context
+            with planning_conv_lock:
+                planning_conversations[conversation_id] = {
+                    "requirement": requirement,
+                    "company_name": company_name,
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "kb_context": kb_context,
+                    "history": [],
+                    "understanding": result.get("understanding", ""),
+                    "created_at": time.time()
+                }
+
+            response_data = {
+                "success": True,
+                "conversationId": conversation_id,
+                "understanding": result.get("understanding", "")
+            }
+
+            if result.get("hasQuestions", True) and result.get("questions"):
+                response_data["questions"] = result.get("questions", [])
+                response_data["questionsIntro"] = "I have a few questions to help create a better plan:"
+            elif result.get("plan"):
+                response_data["plan"] = result.get("plan")
+
+            return jsonify(response_data), 200
+
+        elif action == "continue":
+            conversation_id = data.get("conversationId")
+            user_response = data.get("userResponse", "")
+
+            if not conversation_id:
+                return jsonify({"error": "conversationId is required for continue action"}), 400
+
+            # Get conversation context
+            with planning_conv_lock:
+                conv = planning_conversations.get(conversation_id)
+                if not conv:
+                    return jsonify({"error": "Conversation not found or expired"}), 404
+
+                # Add user response to history
+                conv["history"].append({"role": "user", "content": user_response})
+
+            # Build conversation history for context
+            history_text = "\n".join([
+                f"{'User' if h['role'] == 'user' else 'Assistant'}: {h['content']}"
+                for h in conv["history"]
+            ])
+
+            system_prompt = f"""You are a proposal expert for {conv['company_name']} continuing a planning conversation.
+
+Previous understanding: {conv['understanding']}
+
+Based on the user's response, either:
+1. Ask follow-up questions if still unclear (max 2 questions)
+2. Generate the final plan if you have enough information
+
+Return JSON format:
+{{
+    "needsMoreInfo": true/false,
+    "message": "Brief acknowledgment of what user said",
+    "questions": [  // Only if needsMoreInfo is true
+        {{"question": "Follow-up question?", "reason": "Why needed"}}
+    ],
+    "plan": {{  // Only if needsMoreInfo is false
+        "summary": "Brief approach summary",
+        "sections": [
+            {{"name": "Section name", "description": "What goes here", "dataNeeded": ["data points"]}}
+        ]
+    }}
+}}"""
+
+            user_prompt = f"""REQUIREMENT:
+- Name: {conv['requirement'].get('name', 'Unknown')}
+- Description: {conv['requirement'].get('description', '')}
+
+COMPANY KB CONTEXT:
+{conv['kb_context'] if conv['kb_context'] else "No specific company data available."}
+
+CONVERSATION HISTORY:
+{history_text}
+
+Based on the user's latest response, decide if you need more information or can create the plan.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Update conversation
+            with planning_conv_lock:
+                conv["history"].append({
+                    "role": "assistant",
+                    "content": result.get("message", "")
+                })
+
+            response_data = {
+                "success": True,
+                "message": result.get("message", "")
+            }
+
+            if result.get("needsMoreInfo", False) and result.get("questions"):
+                response_data["questions"] = result.get("questions", [])
+            elif result.get("plan"):
+                response_data["plan"] = result.get("plan")
+                # Clean up conversation
+                with planning_conv_lock:
+                    planning_conversations.pop(conversation_id, None)
+
+            return jsonify(response_data), 200
+
+        else:
+            return jsonify({"error": f"Unknown action: {action}"}), 400
+
+    except Exception as e:
+        print(f"❌ Requirements Plan error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/v3/requirements/generate", methods=["POST", "OPTIONS"])
+def generate_requirement_content():
+    """
+    Generate content for RFP requirement using the chat endpoint with RAG.
+
+    This answers RFP questions/requirements using the company's knowledge base.
+    Uses /api/v3/chat internally for RAG-powered content generation.
+
+    Request:
+    {
+        "requirement": {...},
+        "plan": {...},
+        "fieldName": str,
+        "companyName": str,
+        "projectId": str,
+        "orgId": str
+    }
+
+    Response:
+    {
+        "success": true,
+        "content": "Generated content...",
+        "sources": [...]
+    }
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement = data.get("requirement", {})
+        plan = data.get("plan", {})
+        field_name = data.get("fieldName", "")
+        company_name = data.get("companyName", "Your Company")
+        project_id = data.get("projectId", "")
+        org_id = data.get("orgId", "")
+
+        if not requirement or not field_name:
+            return jsonify({"error": "Requirement and fieldName are required"}), 400
+
+        print(f"🔨 Generating content for: {field_name} (company: {company_name}, org: {org_id[:8] if org_id else 'none'}...)")
+
+        # Build the query for the chat endpoint
+        # This is the RFP question/requirement that needs to be answered
+        section_info = next(
+            (s for s in plan.get("sections", []) if s.get("name") == field_name),
+            {}
+        )
+
+        # Build a query that will retrieve relevant KB content and generate response
+        query = f"""You are writing a proposal response for {company_name}.
+
+RFP REQUIREMENT: {requirement.get('name', 'Unknown')}
+SECTION TO COMPLETE: {field_name}
+SECTION DESCRIPTION: {section_info.get('description', '')}
+
+REQUIREMENT CONTEXT:
+{requirement.get('description', '')}
+{requirement.get('full_context', requirement.get('source_text', ''))[:2000]}
+
+Based on our company's knowledge base, write a professional response for this RFP section.
+Be specific, use actual company data, certifications, and capabilities from our knowledge base.
+Write in a formal proposal style suitable for government/enterprise RFPs.
+If specific data isn't available, note it as [REQUIRES INPUT: description]."""
+
+        # Use the chat_v3 function internally with RAG v2
+        try:
+            # Import the internal chat function
+            from flask import current_app
+
+            # Call chat_v3 internally
+            chat_response = chat_v3_internal(
+                query=query,
+                org_id=org_id,
+                project_id=project_id,
+                ragversion="v2",
+                stream=False
+            )
+
+            if chat_response.get("success"):
+                generated_content = chat_response.get("response", "")
+                sources = chat_response.get("sources", [])
+
+                print(f"✅ Generated content for {field_name} ({len(generated_content)} chars, {len(sources)} sources)")
+
+                return jsonify({
+                    "success": True,
+                    "content": generated_content,
+                    "sources": sources,
+                    "fieldName": field_name
+                }), 200
+            else:
+                # Fallback to direct Claude call if chat fails
+                print(f"⚠️ Chat API failed, falling back to direct generation")
+                raise Exception(chat_response.get("error", "Chat API failed"))
+
+        except Exception as chat_err:
+            print(f"⚠️ Chat fallback: {chat_err}")
+
+            # Fallback: Direct Claude call with KB context
+            from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+            if not BEDROCK_AVAILABLE:
+                return jsonify({"error": "AI service is not available"}), 503
+
+            # Get KB context directly
+            kb_context = ""
+            sources = []
+            if org_id:
+                try:
+                    kb_result = get_knowledge_base_context(
+                        query=f"{company_name} {field_name} {section_info.get('description', '')}",
+                        org_id=org_id,
+                        project_id=project_id,
+                        knowledge_base_option="global",
+                        top_k=5
+                    )
+                    # get_knowledge_base_context returns a string directly
+                    if kb_result and isinstance(kb_result, str):
+                        kb_context = kb_result
+                except Exception as kb_err:
+                    print(f"KB query failed: {kb_err}")
+
+            claude = BedrockClaude()
+
+            system_prompt = f"""You are a proposal writer for {company_name}.
+Write professional, accurate content for RFP requirements.
+Use the provided company knowledge to make responses specific and credible.
+Match the tone expected in government/enterprise proposals."""
+
+            user_prompt = f"""{query}
+
+COMPANY KNOWLEDGE BASE:
+{kb_context[:4000]}
+
+Write a complete, professional response for this section."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=4096,
+                temperature=0.3,
+                response_format="text"
+            )
+
+            generated_content = result.get("text", "")
+
+            return jsonify({
+                "success": True,
+                "content": generated_content,
+                "sources": sources,
+                "fieldName": field_name
+            }), 200
+
+    except Exception as e:
+        print(f"❌ Generate content error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+def chat_v3_internal(query, org_id, project_id="", ragversion="v2", stream=False):
+    """
+    Internal function to call chat_v3 logic without HTTP request.
+    Used by requirements generation to leverage RAG.
+    """
+    try:
+        from noderag_client import NodeRAGClient
+
+        if ragversion == "v2":
+            # Use NodeRAG for v2
+            noderag = NodeRAGClient()
+            result = noderag.generate_response(
+                query=query,
+                org_id=org_id,
+                top_k=5
+            )
+
+            return {
+                "success": True,
+                "response": result.get("response", ""),
+                "sources": result.get("sources", [])
+            }
+        else:
+            # Fallback for v1
+            from bedrock_client import BedrockClaude
+            claude = BedrockClaude()
+
+            result = claude.call_claude(
+                prompt=query,
+                system="You are a helpful assistant.",
+                max_tokens=4096,
+                temperature=0.3,
+                response_format="text"
+            )
+
+            return {
+                "success": True,
+                "response": result.get("text", ""),
+                "sources": []
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 # ============================================================================

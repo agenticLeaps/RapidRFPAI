@@ -1,9 +1,10 @@
 """
 Requirements Agent - Pass 4 (Background)
 Extracts submission requirements - what to submit, volume structure, page limits, attachments.
+Enhanced with template extraction and coordinate tracking.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 from .base_agent import BaseExtractionAgent
 
 
@@ -11,6 +12,7 @@ class RequirementsAgent(BaseExtractionAgent):
     """
     Submission Requirements extraction agent.
     Extracts volume structure, page limits, required attachments, format requirements.
+    Now also extracts template content and location markers for coordinate extraction.
     """
 
     AGENT_TYPE = "REQUIREMENTS"
@@ -19,12 +21,14 @@ class RequirementsAgent(BaseExtractionAgent):
     def get_prompt(self) -> str:
         return f"""You are a Proposal Submission Specialist analyzing RFP documents.
 Extract detailed submission requirements that define WHAT to submit and HOW.
+IMPORTANT: For each requirement with a template/form, extract the FULL template content and location markers.
 
 INSTRUCTIONS:
 1. Read Section L (Instructions), Section M (Evaluation), and any submission guidance
 2. Identify the complete volume/document structure required
 3. Extract ALL page limits, format requirements, and mandatory attachments
-4. Note any unique submission requirements
+4. For attachments with templates: Extract the COMPLETE template text including all fields, tables, and instructions
+5. Note any unique submission requirements
 
 EXTRACT:
 
@@ -40,17 +44,32 @@ EXTRACT:
    - source_section: Where this requirement is stated (e.g., "Section L.3")
    - source_text: The EXACT quoted text from the document where this is defined (verbatim quote, max 500 chars)
 
-2. **required_attachments** - Mandatory documents/forms
+2. **required_attachments** - Mandatory documents/forms (ENHANCED)
    For each attachment:
    - name: Name of the required document
    - description: What it is
    - file_extension: Required file format extension (e.g., ".pdf", ".xlsx", ".docx", ".doc", ".xls", ".zip", ".txt", null if not specified)
      IMPORTANT: Extract the exact file extension if the RFP specifies a format (e.g., "Submit in PDF format" -> ".pdf", "Excel spreadsheet" -> ".xlsx")
-   - template_provided: true/false - is a template/form provided
-   - source_section: Where this requirement is stated (e.g., "Section L.5.2")
+   - template_provided: true/false - is a template/form provided in the RFP
+   - source_section: Where this requirement is stated (e.g., "Section L.5.2", "Appendix B")
    - source_text: The EXACT quoted text from the document where this requirement is stated (verbatim quote, max 500 chars)
    - is_mandatory: true/false
    - submission_method: How to submit (with proposal, separate, portal, etc.)
+
+   NEW FIELDS for template extraction:
+   - full_context: The COMPLETE text explaining this requirement including all instructions, guidance, and the template itself (up to 5000 chars). Include 2-3 paragraphs before and after the template.
+   - template_type: One of: "form", "table", "certificate", "checklist", "narrative", "spreadsheet", "acknowledgment"
+   - template_content: Object containing the extracted template structure:
+     - type: "table" | "form_fields" | "text_block"
+     - headers: Array of column headers (for tables)
+     - rows: Array of row data (for tables, each row is array of cell values)
+     - fields: Array of form fields, each with: {{name, type, required, description}}
+       - type can be: "text", "signature", "date", "checkbox", "long_text", "number"
+     - raw_text: The complete raw text of the template exactly as it appears
+   - template_markers: Object to help locate the template in the original document:
+     - start_text: The EXACT text that marks the beginning of the template (first 100 chars)
+     - end_text: The EXACT text that marks the end of the template (last 100 chars)
+     - page_hint: Approximate page number if mentioned (e.g., "Appendix B" or page number)
 
 3. **format_requirements** - Overall format specifications
    - font_type: Required font (e.g., "Times New Roman", "Arial")
@@ -124,7 +143,7 @@ Return ONLY valid JSON, no markdown."""
                     "source_text": vol.get("source_text"),
                 })
 
-        # Required attachments
+        # Required attachments (Enhanced with template extraction)
         if "required_attachments" in result:
             for att in result["required_attachments"]:
                 # Normalize file extension - ensure it starts with a dot
@@ -132,7 +151,28 @@ Return ONLY valid JSON, no markdown."""
                 if file_ext and not file_ext.startswith('.'):
                     file_ext = f".{file_ext}"
 
+                # Process template_content if present
+                template_content = att.get("template_content")
+                if template_content:
+                    template_content = {
+                        "type": template_content.get("type", "text_block"),
+                        "headers": template_content.get("headers", []),
+                        "rows": template_content.get("rows", []),
+                        "fields": template_content.get("fields", []),
+                        "raw_text": template_content.get("raw_text", "")
+                    }
+
+                # Process template_markers if present
+                template_markers = att.get("template_markers")
+                if template_markers:
+                    template_markers = {
+                        "start_text": template_markers.get("start_text", ""),
+                        "end_text": template_markers.get("end_text", ""),
+                        "page_hint": template_markers.get("page_hint")
+                    }
+
                 validated["required_attachments"].append({
+                    # Original fields
                     "name": att.get("name", ""),
                     "description": att.get("description", ""),
                     "file_extension": file_ext.lower() if file_ext else None,
@@ -141,6 +181,12 @@ Return ONLY valid JSON, no markdown."""
                     "source_text": att.get("source_text"),
                     "is_mandatory": bool(att.get("is_mandatory", True)),
                     "submission_method": att.get("submission_method"),
+                    # NEW: Enhanced template fields
+                    "full_context": att.get("full_context", ""),
+                    "template_type": att.get("template_type"),
+                    "template_content": template_content,
+                    "template_markers": template_markers,
+                    "template_location": None,  # Will be populated by coordinate extraction
                 })
 
         # Format requirements
@@ -195,6 +241,108 @@ Return ONLY valid JSON, no markdown."""
         validated["factor_count"] = len(validated["evaluation_factors"])
 
         return validated
+
+
+    def extract_template_coordinates(
+        self,
+        attachments: List[Dict],
+        files_data: List[Tuple[bytes, str]]
+    ) -> List[Dict]:
+        """
+        Post-process attachments to add template coordinates using PyMuPDF
+
+        Args:
+            attachments: List of validated attachment dicts
+            files_data: List of (file_bytes, filename) tuples
+
+        Returns:
+            Attachments with template_location populated
+        """
+        try:
+            from .template_extractor import template_extractor
+        except ImportError:
+            print("Template extractor not available")
+            return attachments
+
+        # Build filename to bytes mapping
+        file_map = {filename: data for data, filename in files_data}
+
+        for att in attachments:
+            if not att.get("template_provided") or not att.get("template_markers"):
+                continue
+
+            markers = att["template_markers"]
+            source_section = att.get("source_section", "")
+
+            # Try to find the template in each PDF file
+            for filename, file_bytes in file_map.items():
+                if not filename.lower().endswith('.pdf'):
+                    continue
+
+                result = template_extractor.extract_template_from_pdf(
+                    pdf_bytes=file_bytes,
+                    template_hints={
+                        "start_marker": markers.get("start_text", ""),
+                        "end_marker": markers.get("end_text", ""),
+                        "template_type": att.get("template_type", "form"),
+                        "source_section": source_section
+                    }
+                )
+
+                if result.get("success"):
+                    location = result["template_location"]
+                    if location:
+                        location["source_file"] = filename
+                        att["template_location"] = location
+
+                    # Optionally enhance template_content with extracted data
+                    if result.get("template_content") and not att.get("template_content", {}).get("raw_text"):
+                        att["template_content"] = result["template_content"]
+
+                    break  # Found in this file, no need to check others
+
+        return attachments
+
+    def extract(self, files: List[Dict[str, str]], org_id: str) -> Dict[str, Any]:
+        """
+        Override base extract to add template coordinate extraction
+
+        Args:
+            files: List of file dictionaries with 'file_id', 'filename', 'gcs_url'
+            org_id: Organization ID
+
+        Returns:
+            Dictionary with extraction results including template coordinates
+        """
+        # Call parent extract method
+        result = super().extract(files, org_id)
+
+        if not result.get("success"):
+            return result
+
+        # Post-process to add template coordinates
+        if result.get("required_attachments"):
+            # We need file bytes for coordinate extraction
+            # Re-download files for this (or cache from parent call)
+            import tempfile
+            temp_dir = tempfile.mkdtemp(prefix="rfp_template_")
+
+            try:
+                files_data = self._download_files(files, temp_dir)
+                result["required_attachments"] = self.extract_template_coordinates(
+                    result["required_attachments"],
+                    files_data
+                )
+            except Exception as e:
+                print(f"Template coordinate extraction failed: {e}")
+            finally:
+                import shutil
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+
+        return result
 
 
 # Endpoint handler for Flask

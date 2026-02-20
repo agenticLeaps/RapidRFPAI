@@ -115,3 +115,6 @@ nest-asyncio>=1.5.0
 # AWS Bedrock for Claude
 boto3>=1.34.0
 
+# PDF Template Extraction with Coordinates
+PyMuPDF>=1.23.0
+
