@@ -12103,24 +12103,44 @@ def chat_v3_internal(query, org_id, project_id="", ragversion="v2", stream=False
     """
     Internal function to call chat_v3 logic without HTTP request.
     Used by requirements generation to leverage RAG.
+    Calls NodeRAG service via HTTP (same as generate_noderag_response).
     """
     try:
-        from noderag_client import NodeRAGClient
-
         if ragversion == "v2":
-            # Use NodeRAG for v2
-            noderag = NodeRAGClient()
-            result = noderag.generate_response(
-                query=query,
-                org_id=org_id,
-                top_k=5
+            # Use NodeRAG service via HTTP - same pattern as generate_noderag_response
+            noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+
+            payload = {
+                "org_id": org_id,
+                "query": query,
+                "conversation_history": "",
+                "max_tokens": 4096,
+                "temperature": 0.3
+            }
+
+            print(f"🤖 chat_v3_internal: Calling NodeRAG at {noderag_url}/api/v1/generate-response")
+
+            response = requests.post(
+                f"{noderag_url}/api/v1/generate-response",
+                json=payload,
+                timeout=60,
+                headers={"Content-Type": "application/json"}
             )
 
-            return {
-                "success": True,
-                "response": result.get("response", ""),
-                "sources": result.get("sources", [])
-            }
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ chat_v3_internal: NodeRAG response received with {len(result.get('sources', []))} sources")
+                return {
+                    "success": True,
+                    "response": result.get("response", ""),
+                    "sources": result.get("sources", [])
+                }
+            else:
+                print(f"❌ chat_v3_internal: NodeRAG error {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"NodeRAG service error: {response.status_code}"
+                }
         else:
             # Fallback for v1
             from bedrock_client import BedrockClaude
@@ -12140,7 +12160,20 @@ def chat_v3_internal(query, org_id, project_id="", ragversion="v2", stream=False
                 "sources": []
             }
 
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ chat_v3_internal: NodeRAG connection failed - {e}")
+        return {
+            "success": False,
+            "error": "NodeRAG service unavailable - is it running on port 5001?"
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ chat_v3_internal: NodeRAG timeout")
+        return {
+            "success": False,
+            "error": "NodeRAG service timeout"
+        }
     except Exception as e:
+        print(f"❌ chat_v3_internal: Error - {e}")
         return {
             "success": False,
             "error": str(e)
