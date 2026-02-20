@@ -11757,16 +11757,26 @@ IMPORTANT:
 - Use the company's knowledge base context to inform your understanding
 - Only ask questions if genuinely needed - don't ask obvious questions
 - Questions should help you create more accurate, company-specific content
+- Each question MUST include 2-4 clickable options for the user to choose from
 
 Return JSON format:
 {{
     "understanding": "Clear explanation of what this requirement asks for...",
     "hasQuestions": true/false,
     "questions": [
-        {{"question": "Specific question?", "reason": "Why this matters"}}
+        {{
+            "question": "Specific question?",
+            "options": ["Option 1", "Option 2", "Option 3", "Not sure"]
+        }}
     ],
     "plan": null  // Only include if hasQuestions is false
 }}
+
+QUESTION OPTIONS EXAMPLES:
+- For yes/no questions: ["Yes", "No", "Partially", "Not sure"]
+- For certification status: ["Yes, certified", "In progress", "Not certified", "Not applicable"]
+- For experience level: ["Extensive (5+ years)", "Moderate (2-5 years)", "Limited (<2 years)", "None"]
+- For team size: ["Small (1-5)", "Medium (6-20)", "Large (20+)", "Will hire as needed"]
 
 If hasQuestions is false, also include:
 {{
@@ -11861,12 +11871,17 @@ Based on the user's response, either:
 1. Ask follow-up questions if still unclear (max 2 questions)
 2. Generate the final plan if you have enough information
 
+IMPORTANT: Each question MUST include 2-4 clickable options for the user to choose from.
+
 Return JSON format:
 {{
     "needsMoreInfo": true/false,
     "message": "Brief acknowledgment of what user said",
     "questions": [  // Only if needsMoreInfo is true
-        {{"question": "Follow-up question?", "reason": "Why needed"}}
+        {{
+            "question": "Follow-up question?",
+            "options": ["Option 1", "Option 2", "Option 3", "Not sure"]
+        }}
     ],
     "plan": {{  // Only if needsMoreInfo is false
         "summary": "Brief approach summary",
@@ -11918,6 +11933,73 @@ Return ONLY valid JSON."""
                     planning_conversations.pop(conversation_id, None)
 
             return jsonify(response_data), 200
+
+        elif action == "generate_plan":
+            # Direct plan generation after Q&A
+            conversation_id = data.get("conversationId")
+            user_response = data.get("userResponse", "")
+
+            # Get conversation context if available
+            conv = None
+            with planning_conv_lock:
+                conv = planning_conversations.get(conversation_id)
+
+            # Use conversation context or build from request
+            conv_company_name = conv["company_name"] if conv else company_name
+            conv_org_id = conv["org_id"] if conv else org_id
+            conv_kb_context = conv["kb_context"] if conv else ""
+            conv_understanding = conv["understanding"] if conv else ""
+
+            system_prompt = f"""You are a proposal expert for {conv_company_name}. Based on the Q&A conversation, generate a comprehensive plan for completing this RFP requirement.
+
+Previous understanding: {conv_understanding}
+
+Generate a structured plan that incorporates all the user's answers.
+
+Return JSON format:
+{{
+    "summary": "Brief approach summary incorporating user's answers",
+    "sections": [
+        {{
+            "name": "Section name",
+            "description": "What goes here",
+            "dataNeeded": ["data points"]
+        }}
+    ],
+    "recommendations": ["Key recommendation 1", "Key recommendation 2"]
+}}"""
+
+            user_prompt = f"""REQUIREMENT:
+- Name: {requirement.get('name', 'Unknown')}
+- Description: {requirement.get('description', '')}
+- Full Context: {requirement.get('full_context', requirement.get('source_text', ''))[:3000]}
+
+COMPANY KB CONTEXT:
+{conv_kb_context if conv_kb_context else "No specific company data available."}
+
+USER'S ANSWERS TO QUESTIONS:
+{user_response}
+
+Generate the final plan based on the requirement and user's answers.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Clean up conversation
+            if conversation_id:
+                with planning_conv_lock:
+                    planning_conversations.pop(conversation_id, None)
+
+            return jsonify({
+                "success": True,
+                "plan": result
+            }), 200
 
         else:
             return jsonify({"error": f"Unknown action: {action}"}), 400
@@ -11985,7 +12067,7 @@ def generate_requirement_content():
         )
 
         # Build a query that will retrieve relevant KB content and generate response
-        query = f"""You are writing a proposal response for {company_name}.
+        query = f"""You are a proposal writer completing an RFP response document.
 
 RFP REQUIREMENT: {requirement.get('name', 'Unknown')}
 SECTION TO COMPLETE: {field_name}
@@ -11995,10 +12077,34 @@ REQUIREMENT CONTEXT:
 {requirement.get('description', '')}
 {requirement.get('full_context', requirement.get('source_text', ''))[:2000]}
 
-Based on our company's knowledge base, write a professional response for this RFP section.
-Be specific, use actual company data, certifications, and capabilities from our knowledge base.
-Write in a formal proposal style suitable for government/enterprise RFPs.
-If specific data isn't available, note it as [REQUIRES INPUT: description]."""
+INSTRUCTIONS:
+1. Write ONLY the content for this section in XML format
+2. Use the company's actual name, certifications, and data from the knowledge base
+3. For missing specifics, use: <placeholder>description of what to enter</placeholder>
+4. NEVER say "I don't have enough information" - write what you can with placeholders
+5. Output MUST be valid XML using these tags:
+
+OUTPUT FORMAT (use these XML tags):
+<content>
+  <heading level="1|2|3">Heading Text</heading>
+  <paragraph>Regular text with <bold>bold text</bold> and <italic>italic</italic></paragraph>
+  <list>
+    <item>First item</item>
+    <item>Second item</item>
+  </list>
+  <table>
+    <row><cell>Header 1</cell><cell>Header 2</cell></row>
+    <row><cell>Data 1</cell><cell>Data 2</cell></row>
+  </table>
+  <signature-block>
+    <line>Signature</line>
+    <line>Printed Name</line>
+    <line>Title</line>
+    <line>Date</line>
+  </signature-block>
+</content>
+
+Write the XML content now:"""
 
         # Use the chat_v3 function internally with RAG v2
         try:
@@ -12060,17 +12166,38 @@ If specific data isn't available, note it as [REQUIRES INPUT: description]."""
 
             claude = BedrockClaude()
 
-            system_prompt = f"""You are a proposal writer for {company_name}.
-Write professional, accurate content for RFP requirements.
-Use the provided company knowledge to make responses specific and credible.
-Match the tone expected in government/enterprise proposals."""
+            system_prompt = f"""You are a proposal writer completing an RFP response document.
+
+RULES:
+1. Write ONLY in XML format - no explanations, no meta-commentary
+2. Use the company's actual name, certifications, and data from the knowledge base
+3. For missing specifics, use: <placeholder>description</placeholder>
+4. NEVER say "I don't have information" - write what you can with placeholders
+
+OUTPUT FORMAT (use these XML tags):
+<content>
+  <heading level="1|2|3">Heading Text</heading>
+  <paragraph>Regular text with <bold>bold</bold> and <italic>italic</italic></paragraph>
+  <list>
+    <item>Item text</item>
+  </list>
+  <table>
+    <row><cell>Cell 1</cell><cell>Cell 2</cell></row>
+  </table>
+  <signature-block>
+    <line>Signature</line>
+    <line>Printed Name</line>
+    <line>Title</line>
+    <line>Date</line>
+  </signature-block>
+</content>"""
 
             user_prompt = f"""{query}
 
 COMPANY KNOWLEDGE BASE:
 {kb_context[:4000]}
 
-Write a complete, professional response for this section."""
+Write the XML content now:"""
 
             result = claude.call_claude(
                 prompt=user_prompt,
