@@ -1,0 +1,38 @@
+name: Deploy to Dev (ai-dev.rapidrfp.ai)
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy files to EC2
+      uses: easingthemes/ssh-deploy@v5.0.3
+      with:
+        SSH_PRIVATE_KEY: ${{ secrets.RAPIDRFPAI_DEV_SSH_KEY }}
+        REMOTE_HOST: ${{ secrets.RAPIDRFPAI_DEV_HOST }}
+        REMOTE_USER: ubuntu
+        TARGET: /home/ubuntu/rapidrfpai/
+        EXCLUDE: ".git, .gitignore, venv/, __pycache__/, *.pyc, .env, logs/, uploads/, .github/"
+        SCRIPT_BEFORE: |
+          echo "Starting deployment..."
+        SCRIPT_AFTER: |
+          cd /home/ubuntu/rapidrfpai
+          docker compose build rapidrfpai
+          docker compose up -d rapidrfpai
+          docker image prune -f
+          docker compose ps
+          echo "Deployment completed at $(date)"
+
+    - name: Health Check
+      run: |
+        sleep 45
+        curl -f https://ai-dev.rapidrfp.ai/health || curl -f http://${{ secrets.RAPIDRFPAI_DEV_HOST }}:8080/health || exit 1
+        echo "Health check passed!"

@@ -81,6 +81,7 @@ CORS(app, origins=[
     "https://backendprod-657352464140.us-central1.run.app",
     "https://carebackend-657352464140.us-central1.run.app",
     "http://localhost:3000",
+    "http://localhost:3001",
     "http://localhost:5173"
 ],
      methods=["GET", "POST", "DELETE", "OPTIONS", "PUT"],
@@ -673,7 +674,7 @@ Generate {max_variations} related search queries that would find the same or sim
 Return only the queries, one per line, without numbering or explanations.
 """
         
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         response = model.generate_content(
             [Part.from_text(expansion_prompt)],
             generation_config={
@@ -1460,7 +1461,7 @@ Return the extracted content as plain text without any formatting or special cha
 """
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content
         parts = [Part.from_text(prompt)]
@@ -2181,8 +2182,23 @@ def delete_collection(collection_ref, batch_size):
     
     return deleted_count
 
-def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global", rerank=False, enable_hybrid_search=True, dense_weight=0.7, sparse_weight=0.3, enable_query_expansion=True, max_query_variations=2, context_type="general"):
-    """Get context from knowledge base based on option (global or specific)"""
+def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option="global", rerank=False, enable_hybrid_search=True, dense_weight=0.7, sparse_weight=0.3, enable_query_expansion=True, max_query_variations=2, context_type="general", top_k=3):
+    """Get context from knowledge base based on option (global or specific)
+
+    Args:
+        query: Search query string
+        org_id: Organization ID
+        project_id: Project ID
+        knowledge_base_option: "global" or "specific"
+        rerank: Whether to apply reranking
+        enable_hybrid_search: Whether to use hybrid search
+        dense_weight: Weight for dense vectors in hybrid search
+        sparse_weight: Weight for sparse vectors in hybrid search
+        enable_query_expansion: Whether to expand queries
+        max_query_variations: Max query variations for expansion
+        context_type: Type of context (general, etc.)
+        top_k: Number of top results to return (default 3)
+    """
     try:
         # Get query embedding
         query_embedding = np.array(embed_query(query))
@@ -2278,18 +2294,18 @@ def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option=
                 
                 if rerank and enhanced_candidates:
                     print(f"🔄 Applying reranking to {len(enhanced_candidates)} enhanced candidates...")
-                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=3)
+                    top_chunks = rerank_documents(query, enhanced_candidates, top_k=top_k)
                 else:
-                    top_chunks = enhanced_candidates[:3]
-                    
+                    top_chunks = enhanced_candidates[:top_k]
+
             elif rerank:
                 print(f"🔄 Applying reranking to {len(retrieved_docs)} documents...")
-                # Get more candidates for reranking (top 10-15), then rerank to get top 3
+                # Get more candidates for reranking (top 10-15), then rerank to get top_k
                 similarity_candidates = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:15]
-                top_chunks = rerank_documents(query, similarity_candidates, top_k=3)
+                top_chunks = rerank_documents(query, similarity_candidates, top_k=top_k)
             else:
                 # Use traditional similarity ranking
-                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:3]
+                top_chunks = sorted(retrieved_docs, key=lambda x: x["score"], reverse=True)[:top_k]
         else:
             top_chunks = []
         
@@ -2327,7 +2343,7 @@ Question:
 {query}
 """
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         responses = model.generate_content(
             [Part.from_text(prompt)],
@@ -2529,7 +2545,7 @@ Format your response as a valid JSON object with sections and questions, like th
             # Combine API prompt + hardcoded JSON format
             prompt = f"{api_prompt}\n{json_format}"
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content based on file type
         parts = [Part.from_text(prompt)]
@@ -6179,7 +6195,7 @@ Provide only the bullet points without any additional explanations or formatting
             prompt += f"\n\nNote: This text is from a {file_type.upper()} file."
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         response = model.generate_content(
             [Part.from_text(prompt)],
@@ -6423,7 +6439,7 @@ Provide only the processed text without any additional explanations or formattin
             final_prompt += f"\n\nRelevant context from your knowledge base:\n{context_text[:1000]}...\n\nUse this context to inform your response but focus on processing the text as requested."
 
         from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
 
         response = model.generate_content(
             [Part.from_text(final_prompt)],
@@ -6836,7 +6852,7 @@ Format your response as a valid JSON array with objects containing "title", "typ
 IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
 """
 
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Prepare the content based on file type
         parts = [Part.from_text(prompt)]
@@ -10398,7 +10414,7 @@ Please provide:
 Focus on extracting factual information that could be used to answer questions or fill in requirements found in forms or questionnaires.
 """
         
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         # Generate comprehensive document analysis
         response = model.generate_content(
@@ -10486,7 +10502,7 @@ If the document doesn't contain relevant information, respond with "Information 
 Answer:
 """
             
-            model = GenerativeModel("gemini-2.0-flash")
+            model = GenerativeModel("gemini-2.5-flash-lite")
             
             response = model.generate_content(
                 [Part.from_text(prompt)],
@@ -10770,7 +10786,7 @@ Please respond in JSON format:
 """
 
         # Use Vertex AI to analyze
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         response = model.generate_content(
             [Part.from_text(analysis_prompt)],
@@ -11189,34 +11205,103 @@ def generate_noderag_response(query, org_id, conversation_history="", data=None)
 
 @app.route("/api/v3/chat", methods=["POST", "OPTIONS"])
 def chat_v3():
-    """V3 Chat endpoint - Simple query with smart defaults"""
+    """V3 Chat endpoint - Simple query with smart defaults and LangChain memory"""
     if request.method == "OPTIONS":
         return "", 200
-    
+
     try:
         # Get request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
-        
+
         query = data.get("query")
         org_id = data.get("orgId")  # Get orgId from request
-        conversation_history = data.get("conversationHistory", "")  # Get conversation history
+        conversation_history = data.get("conversationHistory", "")  # Get conversation history (string or list)
+        conversation_id = data.get("conversationId")  # NEW: For LangChain memory
         rag_version = data.get("ragversion", "v1")  # Get ragversion parameter
-        
+
         print(f"💬 V3 Chat query: '{query[:100]}...'")
         print(f"🏢 V3 Chat orgId: {org_id}")
         print(f"🔧 V3 Chat ragversion: {rag_version}")
-        print(f"📜 V3 Chat conversation history: {conversation_history[:100]}..." if conversation_history else "📜 No conversation history")
-        
+        print(f"🆔 V3 Chat conversationId: {conversation_id}")
+
         if not query:
             return jsonify({"error": "Query is required"}), 400
-        
+
+        # Use LangChain memory if conversation_id provided
+        formatted_history = conversation_history
+        memory_manager = None
+
+        if conversation_id:
+            try:
+                from langchain_memory import get_memory_for_conversation
+                memory_manager = get_memory_for_conversation(conversation_id)
+
+                if memory_manager.is_initialized:
+                    # Load history if provided and memory is empty
+                    if conversation_history and memory_manager.get_message_count() == 0:
+                        # Parse history if it's a list
+                        if isinstance(conversation_history, list):
+                            memory_manager.load_from_history(conversation_history)
+                            print(f"📚 Loaded {len(conversation_history)} messages into LangChain memory")
+                        elif isinstance(conversation_history, str) and conversation_history.strip():
+                            # Try to parse as JSON list
+                            try:
+                                import json
+                                history_list = json.loads(conversation_history)
+                                if isinstance(history_list, list):
+                                    memory_manager.load_from_history(history_list)
+                                    print(f"📚 Parsed and loaded {len(history_list)} messages into LangChain memory")
+                            except:
+                                # Keep as string if not JSON
+                                pass
+
+                    # Get formatted context from LangChain (includes summary + recent)
+                    formatted_history = memory_manager.get_context()
+                    summary = memory_manager.get_summary()
+
+                    print(f"🧠 LangChain memory context length: {len(formatted_history)} chars")
+                    if summary:
+                        print(f"📝 Conversation summary available: {len(summary)} chars")
+                else:
+                    print("⚠️ LangChain memory not initialized, using raw history")
+
+            except ImportError as e:
+                print(f"⚠️ LangChain memory not available: {e}. Using raw history.")
+            except Exception as e:
+                print(f"⚠️ LangChain memory error: {e}. Using raw history.")
+
+        # Log conversation history status
+        if formatted_history:
+            hist_preview = formatted_history[:100] if isinstance(formatted_history, str) else str(formatted_history)[:100]
+            print(f"📜 V3 Chat conversation history: {hist_preview}...")
+        else:
+            print("📜 No conversation history")
+
         # Handle different RAG versions
         if rag_version == "v2":
             # Use NodeRAG for response generation
             print("🤖 Using NodeRAG v2 for response generation...")
-            return generate_noderag_response(query, org_id, conversation_history, data)
+            response_result = generate_noderag_response(query, org_id, formatted_history, data)
+
+            # Update LangChain memory with new exchange after response
+            if memory_manager and memory_manager.is_initialized:
+                try:
+                    # Extract response text from the result
+                    if hasattr(response_result, 'get_json'):
+                        result_data = response_result.get_json()
+                        ai_response = result_data.get('response', '')
+                    else:
+                        ai_response = ''
+
+                    if ai_response:
+                        memory_manager.add_exchange(query, ai_response)
+                        print(f"🧠 Updated LangChain memory with new exchange")
+                except Exception as e:
+                    print(f"⚠️ Failed to update LangChain memory: {e}")
+
+            return response_result
         else:
             # Use existing v1 naive RAG flow
             print("🤖 Using naive RAG v1 for response generation...")
@@ -11255,7 +11340,7 @@ def chat_v3():
         llm_result = generate_rag_answer(
             query=query,
             context=context_result["context"],
-            conversation_history=conversation_history,
+            conversation_history=formatted_history,  # Use LangChain-formatted history
             max_tokens=2048,
             temperature=0.7
         )
@@ -11341,9 +11426,19 @@ def chat_v3():
                 "pipeline": "retrieval_only"
             }
         
+        # Update LangChain memory with new exchange after v1 response
+        if memory_manager and memory_manager.is_initialized:
+            try:
+                ai_response = response.get("answer", "")
+                if ai_response and ai_response != "Please try again later. I am facing technical issues at the moment. If this persists, please contact support":
+                    memory_manager.add_exchange(query, ai_response)
+                    print(f"🧠 Updated LangChain memory with v1 exchange")
+            except Exception as e:
+                print(f"⚠️ Failed to update LangChain memory (v1): {e}")
+
         print(f"✅ V3 Chat response: {len(search_results) if search_results else 0} results")
         return jsonify(response), 200
-        
+
     except Exception as e:
         print(f"❌ V3 Chat error: {str(e)}")
         return jsonify({"error": f"Chat failed: {str(e)}"}), 500
@@ -11408,11 +11503,1393 @@ def search_v3():
         return jsonify({"error": f"Search failed: {str(e)}"}), 500
 
 
+@app.route("/api/v3/shred-documents", methods=["POST", "OPTIONS"])
+def shred_documents_v3():
+    """V3 Document Shredding endpoint - Extract metadata and submission requirements from RFP documents"""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        # Import the document shredder module
+        from document_shredder import shred_documents_endpoint_handler
+
+        # Get request data
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        print(f"📄 V3 Document Shredding: Processing {len(data.get('files', []))} files")
+
+        # Call the shredding handler
+        result, status_code = shred_documents_endpoint_handler(data)
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        print(f"❌ V3 Document Shredding error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Document shredding failed: {str(e)}"
+        }), 500
+
+
+# ================================
+# MULTI-PASS EXTRACTION AGENTS
+# ================================
+
+@app.route("/api/v3/extract-metadata", methods=["POST", "OPTIONS"])
+def extract_metadata_v3():
+    """V3 Metadata Extraction - Pass 1 (Blocking)
+    Extracts project metadata needed for project creation.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.metadata_agent import extract_metadata_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        org_id = data.get("org_id", "")
+
+        print(f"📋 V3 Metadata Extraction: Processing {len(files)} files")
+
+        result = extract_metadata_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Metadata Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Metadata extraction failed: {str(e)}",
+            "agent_type": "METADATA"
+        }), 500
+
+
+@app.route("/api/v3/agents/intelligence", methods=["POST", "OPTIONS"])
+def extract_intelligence_v3():
+    """V3 Intelligence Extraction - Pass 2 (Background)
+    Extracts Go/No-Go assessment, risks, competitive insights, and pricing intelligence.
+    Also performs RAG-based eligibility verification if rag_session_id is provided.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.intelligence_agent import extract_intelligence_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        rag_session_id = data.get("rag_session_id")
+
+        print(f"🧠 V3 Intelligence Extraction: Processing {len(files)} files")
+        if rag_session_id:
+            print(f"🔗 RAG verification enabled with session: {rag_session_id[:8]}...")
+        else:
+            print(f"ℹ️ No RAG session provided - eligibility items will need manual verification")
+
+        result = extract_intelligence_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Intelligence Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Intelligence extraction failed: {str(e)}",
+            "agent_type": "INTELLIGENCE"
+        }), 500
+
+
+@app.route("/api/v3/agents/intelligence/verify-item", methods=["POST", "OPTIONS"])
+def verify_eligibility_item():
+    """V3 Single Eligibility Item RAG Verification
+    Verifies a single eligibility requirement against company profile via RAG.
+    Used for per-item loading in the Go/No-Go UI.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.intelligence_agent import verify_item_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement_text = data.get("requirement_text", "")
+        if not requirement_text:
+            return jsonify({"error": "No requirement_text provided"}), 400
+
+        result = verify_item_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 200  # Still 200, client handles error state
+
+    except Exception as e:
+        print(f"❌ V3 Item Verification error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Item verification failed: {str(e)}",
+            "status": "PENDING",
+            "category": "USER_INPUT"
+        }), 500
+
+
+@app.route("/api/v3/agents/compliance", methods=["POST", "OPTIONS"])
+def extract_compliance_v3():
+    """V3 Compliance Extraction - Pass 3 (Background)
+    Extracts compliance matrix items from RFP documents.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.compliance_agent import extract_compliance_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        print(f"✅ V3 Compliance Extraction: Processing {len(files)} files")
+
+        result = extract_compliance_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Compliance Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Compliance extraction failed: {str(e)}",
+            "agent_type": "COMPLIANCE"
+        }), 500
+
+
+@app.route("/api/v3/agents/requirements", methods=["POST", "OPTIONS"])
+def extract_requirements_v3():
+    """V3 Requirements Extraction - Pass 4 (Background)
+    Extracts submission requirements, volume structure, and format specifications.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from agents.requirements_agent import extract_requirements_handler
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        files = data.get("files", [])
+        print(f"📝 V3 Requirements Extraction: Processing {len(files)} files")
+
+        result = extract_requirements_handler(data)
+
+        if result.get("success"):
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 500
+
+    except Exception as e:
+        print(f"❌ V3 Requirements Extraction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Requirements extraction failed: {str(e)}",
+            "agent_type": "REQUIREMENTS"
+        }), 500
+
+
+# ============================================================================
+# REQUIREMENTS PLANNING & GENERATION - Claude-powered requirement completion
+# ============================================================================
+
+# In-memory conversation storage for planning sessions
+planning_conversations = {}
+planning_conv_lock = Lock()
+
+@app.route("/api/v3/requirements/plan", methods=["POST", "OPTIONS"])
+def create_requirement_plan():
+    """
+    Conversational planning for RFP requirements - Claude Code style.
+
+    Flow:
+    1. action='start': Analyze requirement, return understanding + questions (if any)
+    2. action='continue': Process user response, return more questions or final plan
+
+    Request:
+    {
+        "requirement": {...},
+        "projectId": str,
+        "companyName": str,
+        "orgId": str,
+        "action": "start" | "continue",
+        "conversationId": str (for continue),
+        "userResponse": str (for continue)
+    }
+
+    Response (start):
+    {
+        "success": true,
+        "conversationId": str,
+        "understanding": str,
+        "questions": [...] or null,
+        "plan": {...} or null (if no questions needed)
+    }
+
+    Response (continue):
+    {
+        "success": true,
+        "message": str,
+        "questions": [...] or null,
+        "plan": {...} or null
+    }
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available"}), 503
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement = data.get("requirement", {})
+        project_id = data.get("projectId", "")
+        company_name = data.get("companyName", "Your Company")
+        org_id = data.get("orgId", "")
+        action = data.get("action", "start")
+
+        if not requirement:
+            return jsonify({"error": "Requirement object is required"}), 400
+
+        print(f"📋 Requirements Plan: action={action}, requirement={requirement.get('name', 'Unknown')}, company={company_name}")
+
+        claude = BedrockClaude()
+
+        # Get KB context if org_id provided
+        kb_context = ""
+        if org_id:
+            try:
+                kb_result = get_knowledge_base_context(
+                    query=f"{requirement.get('name', '')} {requirement.get('description', '')}",
+                    org_id=org_id,
+                    project_id=project_id,
+                    knowledge_base_option="global",
+                    top_k=5
+                )
+                # get_knowledge_base_context returns a string directly
+                if kb_result and isinstance(kb_result, str):
+                    kb_context = kb_result[:2000]
+            except Exception as kb_err:
+                print(f"KB query failed: {kb_err}")
+
+        if action == "start":
+            # Generate conversation ID
+            import uuid
+            conversation_id = str(uuid.uuid4())
+
+            # System prompt for understanding + questions
+            system_prompt = f"""You are a proposal expert for {company_name} helping complete RFP requirements.
+
+Your task is to:
+1. First, explain what you understand from this requirement (be concise, 2-3 sentences)
+2. Then, if you have any doubts or need clarification, ask 2-4 specific questions
+3. If the requirement is clear enough, proceed directly to create a plan
+
+IMPORTANT:
+- Use the company's knowledge base context to inform your understanding
+- Only ask questions if genuinely needed - don't ask obvious questions
+- Questions should help you create more accurate, company-specific content
+- Each question MUST include 2-4 clickable options for the user to choose from
+
+Return JSON format:
+{{
+    "understanding": "Clear explanation of what this requirement asks for...",
+    "hasQuestions": true/false,
+    "questions": [
+        {{
+            "question": "Specific question?",
+            "options": ["Option 1", "Option 2", "Option 3", "Not sure"]
+        }}
+    ],
+    "plan": null  // Only include if hasQuestions is false
+}}
+
+QUESTION OPTIONS EXAMPLES:
+- For yes/no questions: ["Yes", "No", "Partially", "Not sure"]
+- For certification status: ["Yes, certified", "In progress", "Not certified", "Not applicable"]
+- For experience level: ["Extensive (5+ years)", "Moderate (2-5 years)", "Limited (<2 years)", "None"]
+- For team size: ["Small (1-5)", "Medium (6-20)", "Large (20+)", "Will hire as needed"]
+
+If hasQuestions is false, also include:
+{{
+    "understanding": "...",
+    "hasQuestions": false,
+    "questions": [],
+    "plan": {{
+        "summary": "Brief approach summary",
+        "sections": [
+            {{"name": "Section name", "description": "What goes here", "dataNeeded": ["data points"]}}
+        ]
+    }}
+}}"""
+
+            user_prompt = f"""Analyze this RFP requirement:
+
+REQUIREMENT:
+- Name: {requirement.get('name', 'Unknown')}
+- Description: {requirement.get('description', '')}
+- Template Type: {requirement.get('template_type', 'form')}
+- File Extension: {requirement.get('file_extension', 'document')}
+- Full Context: {requirement.get('full_context', requirement.get('source_text', ''))[:3000]}
+
+COMPANY KNOWLEDGE BASE CONTEXT:
+{kb_context if kb_context else "No specific company data available yet."}
+
+First explain your understanding, then decide if you need to ask questions or can proceed with a plan.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Store conversation context
+            with planning_conv_lock:
+                planning_conversations[conversation_id] = {
+                    "requirement": requirement,
+                    "company_name": company_name,
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "kb_context": kb_context,
+                    "history": [],
+                    "understanding": result.get("understanding", ""),
+                    "created_at": time.time()
+                }
+
+            response_data = {
+                "success": True,
+                "conversationId": conversation_id,
+                "understanding": result.get("understanding", "")
+            }
+
+            if result.get("hasQuestions", True) and result.get("questions"):
+                response_data["questions"] = result.get("questions", [])
+                response_data["questionsIntro"] = "I have a few questions to help create a better plan:"
+            elif result.get("plan"):
+                response_data["plan"] = result.get("plan")
+
+            return jsonify(response_data), 200
+
+        elif action == "continue":
+            conversation_id = data.get("conversationId")
+            user_response = data.get("userResponse", "")
+
+            if not conversation_id:
+                return jsonify({"error": "conversationId is required for continue action"}), 400
+
+            # Get conversation context
+            with planning_conv_lock:
+                conv = planning_conversations.get(conversation_id)
+                if not conv:
+                    return jsonify({"error": "Conversation not found or expired"}), 404
+
+                # Add user response to history
+                conv["history"].append({"role": "user", "content": user_response})
+
+            # Build conversation history for context
+            history_text = "\n".join([
+                f"{'User' if h['role'] == 'user' else 'Assistant'}: {h['content']}"
+                for h in conv["history"]
+            ])
+
+            system_prompt = f"""You are a proposal expert for {conv['company_name']} continuing a planning conversation.
+
+Previous understanding: {conv['understanding']}
+
+Based on the user's response, either:
+1. Ask follow-up questions if still unclear (max 2 questions)
+2. Generate the final plan if you have enough information
+
+IMPORTANT: Each question MUST include 2-4 clickable options for the user to choose from.
+
+Return JSON format:
+{{
+    "needsMoreInfo": true/false,
+    "message": "Brief acknowledgment of what user said",
+    "questions": [  // Only if needsMoreInfo is true
+        {{
+            "question": "Follow-up question?",
+            "options": ["Option 1", "Option 2", "Option 3", "Not sure"]
+        }}
+    ],
+    "plan": {{  // Only if needsMoreInfo is false
+        "summary": "Brief approach summary",
+        "sections": [
+            {{"name": "Section name", "description": "What goes here", "dataNeeded": ["data points"]}}
+        ]
+    }}
+}}"""
+
+            user_prompt = f"""REQUIREMENT:
+- Name: {conv['requirement'].get('name', 'Unknown')}
+- Description: {conv['requirement'].get('description', '')}
+
+COMPANY KB CONTEXT:
+{conv['kb_context'] if conv['kb_context'] else "No specific company data available."}
+
+CONVERSATION HISTORY:
+{history_text}
+
+Based on the user's latest response, decide if you need more information or can create the plan.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Update conversation
+            with planning_conv_lock:
+                conv["history"].append({
+                    "role": "assistant",
+                    "content": result.get("message", "")
+                })
+
+            response_data = {
+                "success": True,
+                "message": result.get("message", "")
+            }
+
+            if result.get("needsMoreInfo", False) and result.get("questions"):
+                response_data["questions"] = result.get("questions", [])
+            elif result.get("plan"):
+                response_data["plan"] = result.get("plan")
+                # Clean up conversation
+                with planning_conv_lock:
+                    planning_conversations.pop(conversation_id, None)
+
+            return jsonify(response_data), 200
+
+        elif action == "generate_plan":
+            # Direct plan generation after Q&A
+            conversation_id = data.get("conversationId")
+            user_response = data.get("userResponse", "")
+
+            # Get conversation context if available
+            conv = None
+            with planning_conv_lock:
+                conv = planning_conversations.get(conversation_id)
+
+            # Use conversation context or build from request
+            conv_company_name = conv["company_name"] if conv else company_name
+            conv_org_id = conv["org_id"] if conv else org_id
+            conv_kb_context = conv["kb_context"] if conv else ""
+            conv_understanding = conv["understanding"] if conv else ""
+
+            system_prompt = f"""You are a proposal expert for {conv_company_name}. Based on the Q&A conversation, generate a comprehensive plan for completing this RFP requirement.
+
+Previous understanding: {conv_understanding}
+
+Generate a structured plan that incorporates all the user's answers.
+
+Return JSON format:
+{{
+    "summary": "Brief approach summary incorporating user's answers",
+    "sections": [
+        {{
+            "name": "Section name",
+            "description": "What goes here",
+            "dataNeeded": ["data points"]
+        }}
+    ],
+    "recommendations": ["Key recommendation 1", "Key recommendation 2"]
+}}"""
+
+            user_prompt = f"""REQUIREMENT:
+- Name: {requirement.get('name', 'Unknown')}
+- Description: {requirement.get('description', '')}
+- Full Context: {requirement.get('full_context', requirement.get('source_text', ''))[:3000]}
+
+COMPANY KB CONTEXT:
+{conv_kb_context if conv_kb_context else "No specific company data available."}
+
+USER'S ANSWERS TO QUESTIONS:
+{user_response}
+
+Generate the final plan based on the requirement and user's answers.
+Return ONLY valid JSON."""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=3000,
+                temperature=0.3,
+                response_format="json"
+            )
+
+            # Clean up conversation
+            if conversation_id:
+                with planning_conv_lock:
+                    planning_conversations.pop(conversation_id, None)
+
+            return jsonify({
+                "success": True,
+                "plan": result
+            }), 200
+
+        else:
+            return jsonify({"error": f"Unknown action: {action}"}), 400
+
+    except Exception as e:
+        print(f"❌ Requirements Plan error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/v3/requirements/generate", methods=["POST", "OPTIONS"])
+def generate_requirement_content():
+    """
+    Generate content for RFP requirement using the chat endpoint with RAG.
+
+    This answers RFP questions/requirements using the company's knowledge base.
+    Uses /api/v3/chat internally for RAG-powered content generation.
+
+    Request:
+    {
+        "requirement": {...},
+        "plan": {...},
+        "fieldName": str,
+        "companyName": str,
+        "projectId": str,
+        "orgId": str
+    }
+
+    Response:
+    {
+        "success": true,
+        "content": "Generated content...",
+        "sources": [...]
+    }
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        requirement = data.get("requirement", {})
+        plan = data.get("plan", {})
+        field_name = data.get("fieldName", "")
+        company_name = data.get("companyName", "Your Company")
+        project_id = data.get("projectId", "")
+        org_id = data.get("orgId", "")
+
+        if not requirement or not field_name:
+            return jsonify({"error": "Requirement and fieldName are required"}), 400
+
+        print(f"🔨 Generating content for: {field_name} (company: {company_name}, org: {org_id[:8] if org_id else 'none'}...)")
+
+        # Build the query for the chat endpoint
+        # This is the RFP question/requirement that needs to be answered
+        section_info = next(
+            (s for s in plan.get("sections", []) if s.get("name") == field_name),
+            {}
+        )
+
+        # Build a query that will retrieve relevant KB content and generate response
+        query = f"""You are a proposal writer completing an RFP response document.
+
+RFP REQUIREMENT: {requirement.get('name', 'Unknown')}
+SECTION TO COMPLETE: {field_name}
+SECTION DESCRIPTION: {section_info.get('description', '')}
+
+REQUIREMENT CONTEXT:
+{requirement.get('description', '')}
+{requirement.get('full_context', requirement.get('source_text', ''))[:2000]}
+
+INSTRUCTIONS:
+1. Write ONLY the content for this section in XML format
+2. Use the company's actual name, certifications, and data from the knowledge base
+3. For missing specifics, use: <placeholder>description of what to enter</placeholder>
+4. NEVER say "I don't have enough information" - write what you can with placeholders
+5. Output MUST be valid XML using these tags:
+
+OUTPUT FORMAT (use these XML tags):
+<content>
+  <heading level="1|2|3">Heading Text</heading>
+  <paragraph>Regular text with <bold>bold text</bold> and <italic>italic</italic></paragraph>
+  <list>
+    <item>First item</item>
+    <item>Second item</item>
+  </list>
+  <table>
+    <row><cell>Header 1</cell><cell>Header 2</cell></row>
+    <row><cell>Data 1</cell><cell>Data 2</cell></row>
+  </table>
+  <signature-block>
+    <line>Signature</line>
+    <line>Printed Name</line>
+    <line>Title</line>
+    <line>Date</line>
+  </signature-block>
+</content>
+
+Write the XML content now:"""
+
+        # Use the chat_v3 function internally with RAG v2
+        try:
+            # Import the internal chat function
+            from flask import current_app
+
+            # Call chat_v3 internally
+            chat_response = chat_v3_internal(
+                query=query,
+                org_id=org_id,
+                project_id=project_id,
+                ragversion="v2",
+                stream=False
+            )
+
+            if chat_response.get("success"):
+                generated_content = chat_response.get("response", "")
+                sources = chat_response.get("sources", [])
+
+                print(f"✅ Generated content for {field_name} ({len(generated_content)} chars, {len(sources)} sources)")
+
+                return jsonify({
+                    "success": True,
+                    "content": generated_content,
+                    "sources": sources,
+                    "fieldName": field_name
+                }), 200
+            else:
+                # Fallback to direct Claude call if chat fails
+                print(f"⚠️ Chat API failed, falling back to direct generation")
+                raise Exception(chat_response.get("error", "Chat API failed"))
+
+        except Exception as chat_err:
+            print(f"⚠️ Chat fallback: {chat_err}")
+
+            # Fallback: Direct Claude call with KB context
+            from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+            if not BEDROCK_AVAILABLE:
+                return jsonify({"error": "AI service is not available"}), 503
+
+            # Get KB context directly
+            kb_context = ""
+            sources = []
+            if org_id:
+                try:
+                    kb_result = get_knowledge_base_context(
+                        query=f"{company_name} {field_name} {section_info.get('description', '')}",
+                        org_id=org_id,
+                        project_id=project_id,
+                        knowledge_base_option="global",
+                        top_k=5
+                    )
+                    # get_knowledge_base_context returns a string directly
+                    if kb_result and isinstance(kb_result, str):
+                        kb_context = kb_result
+                except Exception as kb_err:
+                    print(f"KB query failed: {kb_err}")
+
+            claude = BedrockClaude()
+
+            system_prompt = f"""You are a proposal writer completing an RFP response document.
+
+RULES:
+1. Write ONLY in XML format - no explanations, no meta-commentary
+2. Use the company's actual name, certifications, and data from the knowledge base
+3. For missing specifics, use: <placeholder>description</placeholder>
+4. NEVER say "I don't have information" - write what you can with placeholders
+
+OUTPUT FORMAT (use these XML tags):
+<content>
+  <heading level="1|2|3">Heading Text</heading>
+  <paragraph>Regular text with <bold>bold</bold> and <italic>italic</italic></paragraph>
+  <list>
+    <item>Item text</item>
+  </list>
+  <table>
+    <row><cell>Cell 1</cell><cell>Cell 2</cell></row>
+  </table>
+  <signature-block>
+    <line>Signature</line>
+    <line>Printed Name</line>
+    <line>Title</line>
+    <line>Date</line>
+  </signature-block>
+</content>"""
+
+            user_prompt = f"""{query}
+
+COMPANY KNOWLEDGE BASE:
+{kb_context[:4000]}
+
+Write the XML content now:"""
+
+            result = claude.call_claude(
+                prompt=user_prompt,
+                system=system_prompt,
+                max_tokens=4096,
+                temperature=0.3,
+                response_format="text"
+            )
+
+            generated_content = result.get("text", "")
+
+            return jsonify({
+                "success": True,
+                "content": generated_content,
+                "sources": sources,
+                "fieldName": field_name
+            }), 200
+
+    except Exception as e:
+        print(f"❌ Generate content error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+def chat_v3_internal(query, org_id, project_id="", ragversion="v2", stream=False):
+    """
+    Internal function to call chat_v3 logic without HTTP request.
+    Used by requirements generation to leverage RAG.
+    Calls NodeRAG service via HTTP (same as generate_noderag_response).
+    """
+    try:
+        if ragversion == "v2":
+            # Use NodeRAG service via HTTP - same pattern as generate_noderag_response
+            noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
+
+            payload = {
+                "org_id": org_id,
+                "query": query,
+                "conversation_history": "",
+                "max_tokens": 4096,
+                "temperature": 0.3
+            }
+
+            print(f"🤖 chat_v3_internal: Calling NodeRAG at {noderag_url}/api/v1/generate-response")
+
+            response = requests.post(
+                f"{noderag_url}/api/v1/generate-response",
+                json=payload,
+                timeout=60,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ chat_v3_internal: NodeRAG response received with {len(result.get('sources', []))} sources")
+                return {
+                    "success": True,
+                    "response": result.get("response", ""),
+                    "sources": result.get("sources", [])
+                }
+            else:
+                print(f"❌ chat_v3_internal: NodeRAG error {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"NodeRAG service error: {response.status_code}"
+                }
+        else:
+            # Fallback for v1
+            from bedrock_client import BedrockClaude
+            claude = BedrockClaude()
+
+            result = claude.call_claude(
+                prompt=query,
+                system="You are a helpful assistant.",
+                max_tokens=4096,
+                temperature=0.3,
+                response_format="text"
+            )
+
+            return {
+                "success": True,
+                "response": result.get("text", ""),
+                "sources": []
+            }
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ chat_v3_internal: NodeRAG connection failed - {e}")
+        return {
+            "success": False,
+            "error": "NodeRAG service unavailable - is it running on port 5001?"
+        }
+    except requests.exceptions.Timeout:
+        print(f"❌ chat_v3_internal: NodeRAG timeout")
+        return {
+            "success": False,
+            "error": "NodeRAG service timeout"
+        }
+    except Exception as e:
+        print(f"❌ chat_v3_internal: Error - {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# ============================================================================
+# WORKSPACE AI - Action-based AI for Document/Spreadsheet Editors
+# ============================================================================
+
+@app.route("/api/workspace-ai", methods=["POST", "OPTIONS"])
+def workspace_ai():
+    """
+    Workspace AI endpoint for document and spreadsheet editors.
+    Uses Claude via AWS Bedrock to analyze user requests and return executable actions.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available (Bedrock not configured)"}), 503
+
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        message = data.get("message")
+        workspace_type = data.get("workspaceType", "document")  # 'document' or 'spreadsheet'
+        context = data.get("context", {})
+
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+
+        print(f"🤖 Workspace AI Request: type={workspace_type}, message='{message[:100]}...'")
+
+        # Build system prompt based on workspace type
+        if workspace_type == "spreadsheet":
+            system_prompt = get_spreadsheet_system_prompt(context)
+        else:
+            system_prompt = get_document_system_prompt(context)
+
+        # Initialize Claude via Bedrock
+        claude = BedrockClaude()
+
+        # Generate response
+        full_prompt = f"{system_prompt}\n\nUser Request: {message}"
+        result = claude.call_claude(
+            prompt=full_prompt,
+            max_tokens=4096,
+            temperature=0.2,
+            response_format="json"
+        )
+
+        # Ensure result has expected structure
+        if "message" not in result:
+            result["message"] = "Request processed successfully."
+        if "actions" not in result:
+            result["actions"] = []
+
+        print(f"✅ Workspace AI Response: {len(result.get('actions', []))} actions")
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"❌ Workspace AI error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"AI processing failed: {str(e)}",
+            "message": "Sorry, I encountered an error processing your request.",
+            "actions": []
+        }), 500
+
+
+def get_spreadsheet_system_prompt(context: dict) -> str:
+    """Generate system prompt for spreadsheet AI with enhanced context"""
+
+    # Extract context info
+    active_cell = context.get("activeCell", "A1")
+    selected_range = context.get("selectedRange", "")
+    sheet_data = context.get("sheetData", {})
+    headers = sheet_data.get("headers", [])
+    rows = sheet_data.get("rows", [])
+    total_rows = sheet_data.get("totalRows", 0)
+    total_cols = sheet_data.get("totalCols", 0)
+
+    # Extract enhanced insights if available
+    insights = context.get("insights", {})
+    columns_info = insights.get("columns", {})
+    duplicate_rows = insights.get("duplicateRows", [])
+    empty_rows = insights.get("emptyRows", [])
+    relevant_rows = context.get("relevantRows", [])
+
+    # Use formatted context if provided (from context manager)
+    formatted_context = context.get("formattedContext", "")
+
+    # Build context string
+    if formatted_context:
+        context_info = formatted_context
+    else:
+        # Fallback to basic context
+        context_info = f"""
+Current Selection:
+- Active cell: {active_cell}
+- Selected range: {selected_range or 'None'}
+
+Spreadsheet Info:
+- Total rows: {total_rows}
+- Total columns: {total_cols}
+"""
+        if headers:
+            context_info += f"\nColumn Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:26])])}"
+
+        # Add column insights if available
+        if columns_info:
+            context_info += "\n\n### Column Analysis:\n"
+            for col_letter, col_data in list(columns_info.items())[:10]:
+                col_type = col_data.get("type", "unknown")
+                stats = col_data.get("statistics", {})
+                unique_vals = col_data.get("uniqueValues", [])[:5]
+                col_idx = ord(col_letter) - 65
+                header_name = headers[col_idx] if col_idx < len(headers) else col_letter
+
+                context_info += f"- Column {col_letter} ({header_name}): type={col_type}"
+                if col_type == "number" and stats:
+                    context_info += f", sum={stats.get('sum', 0):.2f}, avg={stats.get('avg', 0):.2f}"
+                if unique_vals:
+                    context_info += f", values: {unique_vals}"
+                context_info += "\n"
+
+        # Add data quality insights
+        if duplicate_rows:
+            context_info += f"\n⚠️ Found {len(duplicate_rows)} duplicate rows"
+        if empty_rows:
+            context_info += f"\n⚠️ Found {len(empty_rows)} empty rows"
+
+        if rows:
+            context_info += f"\n\n### Sample Data ({min(15, len(rows))} rows shown):\n"
+            for idx, row in enumerate(rows[:15]):
+                row_data = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(row) if v])
+                if row_data:
+                    context_info += f"Row {idx + 2}: {row_data}\n"
+
+        # Add relevant rows for query-specific context
+        if relevant_rows:
+            context_info += f"\n\n### Rows Matching Query:\n"
+            for item in relevant_rows[:5]:
+                row_num = item.get("row", 0)
+                data = item.get("data", [])
+                reason = item.get("reason", "")
+                row_str = ', '.join([f"{headers[i] if i < len(headers) else chr(65+i)}: {v}" for i, v in enumerate(data) if v])
+                context_info += f"Row {row_num}: {row_str} ({reason})\n"
+
+    return f"""You are a powerful spreadsheet AI assistant that can directly manipulate data AND answer questions about the data.
+
+## ANSWERING QUESTIONS
+For questions like "how many", "count", "what is", "total", etc.:
+- ANALYZE the data provided in the context
+- DIRECTLY ANSWER the question in the message field
+- Only use actions if the user explicitly asks to add a formula or modify the spreadsheet
+- Example: "How many males are there?" → Count from the data and say "There are 25 males in the data."
+
+## AVAILABLE ACTIONS (only use when modifying the spreadsheet is requested):
+- SET_CELL_VALUE: Set a cell's value {{ "type": "SET_CELL_VALUE", "params": {{ "cell": "A1", "value": "text or number" }} }}
+- SET_CELL_FORMULA: Set a cell's formula {{ "type": "SET_CELL_FORMULA", "params": {{ "cell": "A1", "formula": "=SUM(B1:B10)" }} }}
+  - Supported formulas: SUM, AVERAGE, COUNT, COUNTA, COUNTIF, MAX, MIN, basic arithmetic (+,-,*,/)
+  - COUNTIF example: =COUNTIF(D1:D100, "Female") - ALWAYS use specific ranges like D1:D100, NOT D:D
+- SET_RANGE_VALUES: Set multiple cells {{ "type": "SET_RANGE_VALUES", "params": {{ "startCell": "A1", "values": [["a", "b"], ["c", "d"]] }} }}
+- CLEAR_CELLS: Clear cells {{ "type": "CLEAR_CELLS", "params": {{ "range": "A1:B10" }} }}
+- FORMAT_CELLS: Apply formatting {{ "type": "FORMAT_CELLS", "params": {{ "range": "A1:B10", "format": {{ "bold": true, "backgroundColor": "#FFFF00" }} }} }}
+- INSERT_ROW: Insert rows {{ "type": "INSERT_ROW", "params": {{ "afterRow": 5, "count": 1 }} }}
+- INSERT_COLUMN: Insert columns {{ "type": "INSERT_COLUMN", "params": {{ "afterCol": 2, "count": 1 }} }}
+- DELETE_ROW: Delete rows {{ "type": "DELETE_ROW", "params": {{ "row": 5, "count": 1 }} }}
+- DELETE_COLUMN: Delete columns {{ "type": "DELETE_COLUMN", "params": {{ "col": 2, "count": 1 }} }}
+- SORT_RANGE: Sort data {{ "type": "SORT_RANGE", "params": {{ "range": "A1:D10", "column": 0, "ascending": true }} }}
+- FIND_REPLACE: Find and replace values {{ "type": "FIND_REPLACE", "params": {{ "find": "Male", "replace": "Female", "range": "D1:D100" }} }}
+  - range is optional (defaults to entire sheet)
+  - matchCase is optional (defaults to false for case-insensitive matching)
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{{
+  "message": "Your answer or explanation here",
+  "actions": []
+}}
+
+- For QUESTIONS: Answer directly in message, leave actions empty
+- For COMMANDS (add, modify, format, etc.): Explain briefly in message, include actions
+- If you cannot help, explain in the message with empty actions
+
+{context_info}
+"""
+
+
+def get_document_system_prompt(context: dict) -> str:
+    """Generate system prompt for document AI"""
+
+    # Extract context info
+    selected_text = context.get("selectedText", "")
+    document_content = context.get("documentContent", "")
+
+    context_info = ""
+    if selected_text:
+        context_info += f"\nSelected Text:\n\"{selected_text[:500]}{'...' if len(selected_text) > 500 else ''}\""
+
+    if document_content:
+        preview = document_content[:1000]
+        context_info += f"\n\nDocument Preview:\n{preview}{'...' if len(document_content) > 1000 else ''}"
+        context_info += f"\n\n(Total document length: {len(document_content)} characters)"
+
+    return f"""You are a document AI assistant. Based on user requests, analyze the content and return actions to perform on the document.
+
+Available actions you can return:
+- INSERT_TEXT: Insert text {{ "type": "INSERT_TEXT", "params": {{ "text": "content to insert", "position": "cursor" }} }}
+  - position can be: "cursor", "start", "end"
+- REPLACE_SELECTION: Replace selected text {{ "type": "REPLACE_SELECTION", "params": {{ "text": "replacement text" }} }}
+- DELETE_SELECTION: Delete selected text {{ "type": "DELETE_SELECTION", "params": {{}} }}
+- FORMAT_SELECTION: Apply formatting {{ "type": "FORMAT_SELECTION", "params": {{ "bold": true, "italic": false, "underline": false }} }}
+- SET_HEADING: Convert to heading {{ "type": "SET_HEADING", "params": {{ "level": 1 }} }}
+  - level can be: 1, 2, or 3
+- CREATE_LIST: Create a list {{ "type": "CREATE_LIST", "params": {{ "type": "bullet", "items": ["item 1", "item 2"] }} }}
+  - type can be: "bullet" or "numbered"
+- INSERT_TABLE: Insert table {{ "type": "INSERT_TABLE", "params": {{ "rows": 3, "cols": 3, "data": [["a", "b", "c"], ["d", "e", "f"]] }} }}
+- INSERT_LINK: Insert hyperlink {{ "type": "INSERT_LINK", "params": {{ "text": "link text", "url": "https://example.com" }} }}
+
+IMPORTANT: Always respond with valid JSON in this exact format:
+{{
+  "message": "Brief explanation of what you're doing",
+  "actions": [
+    {{ "type": "ACTION_TYPE", "params": {{ ... }} }}
+  ]
+}}
+
+For writing tasks (continue writing, summarize, rewrite, etc.), use INSERT_TEXT or REPLACE_SELECTION with the generated content.
+If you cannot perform the requested action or need clarification, return an empty actions array and explain in the message.
+
+{context_info}
+"""
+
+
+# ============================================================================
+# AGENT MODE - Multi-step autonomous agent for complex tasks
+# ============================================================================
+
+@app.route("/api/copilot/agent", methods=["POST", "OPTIONS"])
+def copilot_agent():
+    """
+    Agent mode endpoint for multi-step autonomous task execution.
+    Uses Claude via AWS Bedrock. Runs an observe → think → act loop until the goal is achieved.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+
+    try:
+        from bedrock_client import BedrockClaude, BEDROCK_AVAILABLE
+
+        if not BEDROCK_AVAILABLE:
+            return jsonify({"error": "AI service is not available (Bedrock not configured)"}), 503
+
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "No valid JSON input found"}), 400
+
+        message = data.get("message")
+        workspace_type = data.get("workspaceType", "spreadsheet")
+        context = data.get("context", {})
+        max_iterations = min(data.get("maxIterations", 10), 15)  # Cap at 15
+
+        if not message:
+            return jsonify({"error": "Message is required"}), 400
+
+        print(f"🤖 Agent Mode Request: type={workspace_type}, goal='{message[:100]}...', max_iterations={max_iterations}")
+
+        # Build agent system prompt
+        agent_prompt = get_agent_system_prompt(workspace_type, context)
+
+        # Initialize Claude via Bedrock
+        claude = BedrockClaude()
+
+        # Run agent loop
+        session_id = f"agent-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        actions_executed = []
+        iteration = 0
+        goal_achieved = False
+        final_message = ""
+
+        while iteration < max_iterations and not goal_achieved:
+            iteration += 1
+            print(f"🔄 Agent iteration {iteration}/{max_iterations}")
+
+            # Build the think prompt
+            previous_actions_str = ""
+            if actions_executed:
+                previous_actions_str = "\n### Previous Actions:\n" + "\n".join([
+                    f"- [{a['result']}] {a['type']}: {a.get('description', '')}"
+                    for a in actions_executed
+                ])
+
+            think_prompt = f"""{agent_prompt}
+
+## User's Goal
+{message}
+
+{previous_actions_str}
+
+## Your Task (Iteration {iteration}/{max_iterations})
+Analyze the current state and decide:
+1. Is the goal achieved? (yes/no)
+2. If no, what's the next action to take?
+3. Provide your reasoning.
+
+Respond in JSON:
+{{
+  "goalAchieved": boolean,
+  "reasoning": "string explaining your thought process",
+  "nextAction": {{
+    "type": "ACTION_TYPE",
+    "params": {{ ... }},
+    "description": "human readable description"
+  }} | null,
+  "summary": "string - only if goalAchieved is true"
+}}
+"""
+
+            # Generate decision using Claude
+            try:
+                decision = claude.call_claude(
+                    prompt=think_prompt,
+                    max_tokens=4096,
+                    temperature=0.3,
+                    response_format="json"
+                )
+            except Exception as e:
+                print(f"❌ Agent failed to get decision from Claude: {str(e)}")
+                break
+
+            print(f"📝 Agent decision: goalAchieved={decision.get('goalAchieved')}, nextAction={decision.get('nextAction', {}).get('type') if decision.get('nextAction') else None}")
+
+            # Check if goal achieved
+            if decision.get("goalAchieved", False):
+                goal_achieved = True
+                final_message = decision.get("summary", "Goal achieved successfully.")
+                break
+
+            # Execute the next action
+            next_action = decision.get("nextAction")
+            if not next_action:
+                print("⚠️ No next action returned, ending loop")
+                break
+
+            action_record = {
+                "type": next_action.get("type"),
+                "params": next_action.get("params", {}),
+                "description": next_action.get("description", ""),
+                "result": "success",  # Frontend will actually execute
+                "iteration": iteration
+            }
+            actions_executed.append(action_record)
+
+        # Build final response
+        result = {
+            "message": final_message if goal_achieved else f"Completed {iteration} iterations with {len(actions_executed)} actions.",
+            "actions": [{"type": a["type"], "params": a["params"]} for a in actions_executed],
+            "agentResult": {
+                "sessionId": session_id,
+                "goalAchieved": goal_achieved,
+                "iterations": iteration,
+                "actionsExecuted": actions_executed
+            }
+        }
+
+        print(f"✅ Agent completed: goalAchieved={goal_achieved}, iterations={iteration}, actions={len(actions_executed)}")
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"❌ Agent error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": f"Agent processing failed: {str(e)}",
+            "message": "Sorry, the agent encountered an error.",
+            "actions": [],
+            "agentResult": {
+                "goalAchieved": False,
+                "iterations": 0,
+                "actionsExecuted": []
+            }
+        }), 500
+
+
+def get_agent_system_prompt(workspace_type: str, context: dict) -> str:
+    """Generate system prompt for agent mode with tool definitions"""
+
+    # Get base context
+    if workspace_type == "spreadsheet":
+        base_context = get_spreadsheet_context_string(context)
+        tools_section = """
+## Available Tools
+
+### READ TOOLS
+- GET_CELL: Get value of a specific cell { "type": "GET_CELL", "params": { "cell": "A1" } }
+- SEARCH: Search for a value { "type": "SEARCH", "params": { "query": "text", "column": "A" } }
+- COUNT_IF: Count cells matching condition { "type": "COUNT_IF", "params": { "range": "A1:A100", "condition": "value" } }
+
+### WRITE TOOLS
+- SET_CELL_VALUE: Set a cell's value { "type": "SET_CELL_VALUE", "params": { "cell": "A1", "value": "text" } }
+- SET_CELL_FORMULA: Set a formula { "type": "SET_CELL_FORMULA", "params": { "cell": "A1", "formula": "=SUM(B1:B10)" } }
+- SET_RANGE_VALUES: Set multiple cells { "type": "SET_RANGE_VALUES", "params": { "startCell": "A1", "values": [["a", "b"]] } }
+- CLEAR_CELLS: Clear cells { "type": "CLEAR_CELLS", "params": { "range": "A1:B10" } }
+
+### STRUCTURE TOOLS
+- INSERT_ROW: Insert rows { "type": "INSERT_ROW", "params": { "afterRow": 5, "count": 1 } }
+- DELETE_ROW: Delete rows { "type": "DELETE_ROW", "params": { "row": 5, "count": 1 } }
+- SORT_RANGE: Sort data { "type": "SORT_RANGE", "params": { "column": 0, "ascending": true } }
+
+### FORMAT TOOLS
+- FORMAT_CELLS: Apply formatting { "type": "FORMAT_CELLS", "params": { "range": "A1:B10", "format": { "bold": true } } }
+
+### DATA TOOLS
+- FIND_REPLACE: Find and replace { "type": "FIND_REPLACE", "params": { "find": "old", "replace": "new" } }
+- REMOVE_DUPLICATES: Remove duplicate rows { "type": "REMOVE_DUPLICATES", "params": { "column": "A" } }
+"""
+    else:
+        base_context = get_document_context_string(context)
+        tools_section = """
+## Available Tools
+
+### WRITE TOOLS
+- INSERT_TEXT: Insert text { "type": "INSERT_TEXT", "params": { "text": "content", "position": "cursor" } }
+- REPLACE_SELECTION: Replace selected text { "type": "REPLACE_SELECTION", "params": { "text": "new text" } }
+- DELETE_SELECTION: Delete selected text { "type": "DELETE_SELECTION", "params": {} }
+
+### FORMAT TOOLS
+- FORMAT_SELECTION: Apply formatting { "type": "FORMAT_SELECTION", "params": { "bold": true, "italic": false } }
+- SET_HEADING: Set heading level { "type": "SET_HEADING", "params": { "level": 1 } }
+
+### STRUCTURE TOOLS
+- CREATE_LIST: Create a list { "type": "CREATE_LIST", "params": { "type": "bullet", "items": ["item1", "item2"] } }
+- INSERT_TABLE: Insert table { "type": "INSERT_TABLE", "params": { "rows": 3, "cols": 3, "data": [["a", "b", "c"]] } }
+- INSERT_LINK: Insert hyperlink { "type": "INSERT_LINK", "params": { "text": "link", "url": "https://..." } }
+"""
+
+    return f"""You are an autonomous AI agent for {workspace_type} editing. You work in an observe → think → act loop to achieve the user's goal.
+
+{tools_section}
+
+## Current Context
+{base_context}
+
+## Guidelines
+1. Break complex tasks into small steps - one action at a time
+2. Verify your actions are working before moving to the next step
+3. If an action fails, try a different approach
+4. Don't repeat actions that already succeeded
+5. Mark goalAchieved=true ONLY when the user's goal is fully accomplished
+6. Be efficient - complete the task in as few iterations as possible
+"""
+
+
+def get_spreadsheet_context_string(context: dict) -> str:
+    """Extract spreadsheet context as a string for agent mode"""
+    formatted_context = context.get("formattedContext", "")
+    if formatted_context:
+        return formatted_context
+
+    # Fallback to basic context
+    active_cell = context.get("activeCell", "A1")
+    selected_range = context.get("selectedRange", "")
+    sheet_data = context.get("sheetData", {})
+    headers = sheet_data.get("headers", [])
+    total_rows = sheet_data.get("totalRows", 0)
+
+    context_str = f"""
+Active cell: {active_cell}
+Selected range: {selected_range or 'None'}
+Total rows: {total_rows}
+"""
+    if headers:
+        context_str += f"Headers: {', '.join([f'{chr(65+i)}: {h}' for i, h in enumerate(headers[:10])])}\n"
+
+    return context_str
+
+
+def get_document_context_string(context: dict) -> str:
+    """Extract document context as a string for agent mode"""
+    formatted_context = context.get("formattedContext", "")
+    if formatted_context:
+        return formatted_context
+
+    selected_text = context.get("selectedText", "")
+    document_content = context.get("documentContent", "")
+
+    context_str = ""
+    if selected_text:
+        context_str += f"Selected text: \"{selected_text[:200]}{'...' if len(selected_text) > 200 else ''}\"\n"
+    if document_content:
+        context_str += f"Document preview: {document_content[:500]}{'...' if len(document_content) > 500 else ''}\n"
+        context_str += f"Total length: {len(document_content)} characters\n"
+
+    return context_str
+
+
 # Keep-alive service for Render server
 def keep_alive_service():
     """Background service that pings the server to keep it alive"""
     global keep_alive_running
-    
+
     # Get configuration
     interval = int(os.environ.get("KEEP_ALIVE_INTERVAL", "840"))  # 14 minutes default
     port = int(os.environ.get("PORT", "8002"))
