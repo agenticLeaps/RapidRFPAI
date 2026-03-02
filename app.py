@@ -11205,34 +11205,103 @@ def generate_noderag_response(query, org_id, conversation_history="", data=None)
 
 @app.route("/api/v3/chat", methods=["POST", "OPTIONS"])
 def chat_v3():
-    """V3 Chat endpoint - Simple query with smart defaults"""
+    """V3 Chat endpoint - Simple query with smart defaults and LangChain memory"""
     if request.method == "OPTIONS":
         return "", 200
-    
+
     try:
         # Get request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
-        
+
         query = data.get("query")
         org_id = data.get("orgId")  # Get orgId from request
-        conversation_history = data.get("conversationHistory", "")  # Get conversation history
+        conversation_history = data.get("conversationHistory", "")  # Get conversation history (string or list)
+        conversation_id = data.get("conversationId")  # NEW: For LangChain memory
         rag_version = data.get("ragversion", "v1")  # Get ragversion parameter
-        
+
         print(f"💬 V3 Chat query: '{query[:100]}...'")
         print(f"🏢 V3 Chat orgId: {org_id}")
         print(f"🔧 V3 Chat ragversion: {rag_version}")
-        print(f"📜 V3 Chat conversation history: {conversation_history[:100]}..." if conversation_history else "📜 No conversation history")
-        
+        print(f"🆔 V3 Chat conversationId: {conversation_id}")
+
         if not query:
             return jsonify({"error": "Query is required"}), 400
-        
+
+        # Use LangChain memory if conversation_id provided
+        formatted_history = conversation_history
+        memory_manager = None
+
+        if conversation_id:
+            try:
+                from langchain_memory import get_memory_for_conversation
+                memory_manager = get_memory_for_conversation(conversation_id)
+
+                if memory_manager.is_initialized:
+                    # Load history if provided and memory is empty
+                    if conversation_history and memory_manager.get_message_count() == 0:
+                        # Parse history if it's a list
+                        if isinstance(conversation_history, list):
+                            memory_manager.load_from_history(conversation_history)
+                            print(f"📚 Loaded {len(conversation_history)} messages into LangChain memory")
+                        elif isinstance(conversation_history, str) and conversation_history.strip():
+                            # Try to parse as JSON list
+                            try:
+                                import json
+                                history_list = json.loads(conversation_history)
+                                if isinstance(history_list, list):
+                                    memory_manager.load_from_history(history_list)
+                                    print(f"📚 Parsed and loaded {len(history_list)} messages into LangChain memory")
+                            except:
+                                # Keep as string if not JSON
+                                pass
+
+                    # Get formatted context from LangChain (includes summary + recent)
+                    formatted_history = memory_manager.get_context()
+                    summary = memory_manager.get_summary()
+
+                    print(f"🧠 LangChain memory context length: {len(formatted_history)} chars")
+                    if summary:
+                        print(f"📝 Conversation summary available: {len(summary)} chars")
+                else:
+                    print("⚠️ LangChain memory not initialized, using raw history")
+
+            except ImportError as e:
+                print(f"⚠️ LangChain memory not available: {e}. Using raw history.")
+            except Exception as e:
+                print(f"⚠️ LangChain memory error: {e}. Using raw history.")
+
+        # Log conversation history status
+        if formatted_history:
+            hist_preview = formatted_history[:100] if isinstance(formatted_history, str) else str(formatted_history)[:100]
+            print(f"📜 V3 Chat conversation history: {hist_preview}...")
+        else:
+            print("📜 No conversation history")
+
         # Handle different RAG versions
         if rag_version == "v2":
             # Use NodeRAG for response generation
             print("🤖 Using NodeRAG v2 for response generation...")
-            return generate_noderag_response(query, org_id, conversation_history, data)
+            response_result = generate_noderag_response(query, org_id, formatted_history, data)
+
+            # Update LangChain memory with new exchange after response
+            if memory_manager and memory_manager.is_initialized:
+                try:
+                    # Extract response text from the result
+                    if hasattr(response_result, 'get_json'):
+                        result_data = response_result.get_json()
+                        ai_response = result_data.get('response', '')
+                    else:
+                        ai_response = ''
+
+                    if ai_response:
+                        memory_manager.add_exchange(query, ai_response)
+                        print(f"🧠 Updated LangChain memory with new exchange")
+                except Exception as e:
+                    print(f"⚠️ Failed to update LangChain memory: {e}")
+
+            return response_result
         else:
             # Use existing v1 naive RAG flow
             print("🤖 Using naive RAG v1 for response generation...")
@@ -11271,7 +11340,7 @@ def chat_v3():
         llm_result = generate_rag_answer(
             query=query,
             context=context_result["context"],
-            conversation_history=conversation_history,
+            conversation_history=formatted_history,  # Use LangChain-formatted history
             max_tokens=2048,
             temperature=0.7
         )
@@ -11357,9 +11426,19 @@ def chat_v3():
                 "pipeline": "retrieval_only"
             }
         
+        # Update LangChain memory with new exchange after v1 response
+        if memory_manager and memory_manager.is_initialized:
+            try:
+                ai_response = response.get("answer", "")
+                if ai_response and ai_response != "Please try again later. I am facing technical issues at the moment. If this persists, please contact support":
+                    memory_manager.add_exchange(query, ai_response)
+                    print(f"🧠 Updated LangChain memory with v1 exchange")
+            except Exception as e:
+                print(f"⚠️ Failed to update LangChain memory (v1): {e}")
+
         print(f"✅ V3 Chat response: {len(search_results) if search_results else 0} results")
         return jsonify(response), 200
-        
+
     except Exception as e:
         print(f"❌ V3 Chat error: {str(e)}")
         return jsonify({"error": f"Chat failed: {str(e)}"}), 500
