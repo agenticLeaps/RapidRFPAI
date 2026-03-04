@@ -11109,14 +11109,35 @@ def generate_noderag_response(query, org_id, conversation_history="", data=None)
     """Generate response using NodeRAG v2 service"""
     try:
         print(f"🤖 Generating NodeRAG response for: '{query[:100]}...'")
-        
+
+        # Enhance query with conversation context for better follow-up handling
+        enhanced_query = query
+        if conversation_history:
+            try:
+                history_context = ""
+                if isinstance(conversation_history, str):
+                    # Take the last 500 chars of history for context
+                    history_context = conversation_history[-500:] if len(conversation_history) > 500 else conversation_history
+                elif isinstance(conversation_history, list):
+                    # Extract from last few messages
+                    recent_messages = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
+                    history_context = " ".join([msg.get("content", "")[:200] for msg in recent_messages if isinstance(msg, dict)])
+
+                if history_context:
+                    # Create enhanced query that includes conversation context
+                    enhanced_query = f"{query}\n\nConversation context: {history_context}"
+                    print(f"🔍 Enhanced NodeRAG query with {len(history_context)} chars of context")
+            except Exception as e:
+                print(f"⚠️ Could not enhance NodeRAG query with history: {e}")
+                enhanced_query = query
+
         # Get NodeRAG service URL
         noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
-        
+
         # Prepare payload for NodeRAG response generation
         payload = {
             "org_id": org_id,
-            "query": query,
+            "query": enhanced_query,
             "conversation_history": conversation_history,
             "max_tokens": data.get("max_tokens", 2048) if data else 2048,
             "temperature": data.get("temperature", 0.7) if data else 0.7
@@ -11305,21 +11326,44 @@ def chat_v3():
         else:
             # Use existing v1 naive RAG flow
             print("🤖 Using naive RAG v1 for response generation...")
-        
+
         # Use provided orgId or default to None (search all orgs)
         user_id = "api-user"  # Default user
         file_ids = None  # Search all files
         max_results = 5  # Good default
         include_context = True  # Always include context for chat
-        
+
         # Import retrieval and LLM systems
         from retrieval_system import search_documents, get_context
         from llm_integration import generate_rag_answer
-        
+
+        # Enhance search query with conversation context for better follow-up handling
+        enhanced_query = query
+        if formatted_history:
+            try:
+                # Extract context from conversation history to improve search
+                history_context = ""
+                if isinstance(formatted_history, str):
+                    # Take the last 500 chars of history for context
+                    history_context = formatted_history[-500:] if len(formatted_history) > 500 else formatted_history
+                elif isinstance(formatted_history, list):
+                    # Extract from last few messages
+                    recent_messages = formatted_history[-4:] if len(formatted_history) > 4 else formatted_history
+                    history_context = " ".join([msg.get("content", "")[:200] for msg in recent_messages if isinstance(msg, dict)])
+
+                if history_context:
+                    # Create enhanced query that includes conversation context
+                    # This helps RAG find relevant documents for follow-up questions
+                    enhanced_query = f"{query}\n\nConversation context: {history_context}"
+                    print(f"🔍 Enhanced search query with {len(history_context)} chars of context")
+            except Exception as e:
+                print(f"⚠️ Could not enhance query with history: {e}")
+                enhanced_query = query
+
         # Optimized: Single search call for both context and results
         print("🎯 Getting context for query...")
         search_results = search_documents(
-            query=query,
+            query=enhanced_query,
             org_id=org_id,
             file_ids=file_ids,
             top_k=max_results
