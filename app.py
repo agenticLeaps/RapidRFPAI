@@ -7903,7 +7903,11 @@ def upload_file_v3():
         file_id = request.form.get("fileId") or request.args.get("fileId")
         user_id = request.form.get("userId") or request.args.get("userId")
         rag_version = request.form.get("ragversion") or request.args.get("ragversion", "v1")
+
+        # Support both S3 (new) and GCS (legacy) parameters
+        from_s3 = request.form.get('fromS3', 'false').lower() == 'true'
         from_gcs = request.form.get('fromGCS', 'false').lower() == 'true'
+        from_cloud_storage = from_s3 or from_gcs
 
         # Extract auth token from form, args, or headers
         auth_token = request.form.get("authToken") or request.args.get("authToken")
@@ -7913,38 +7917,44 @@ def upload_file_v3():
             if auth_token.startswith('Bearer '):
                 auth_token = auth_token[7:]
 
-        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, ragversion={rag_version}, fromGCS={from_gcs}")
-        
+        print(f"📥 V3 Upload: fileId={file_id}, orgId={org_id}, userId={user_id}, ragversion={rag_version}, fromS3={from_s3}, fromGCS={from_gcs}")
+
         if not org_id or not file_id or not user_id:
             return jsonify({"error": "orgId, fileId, and userId are required"}), 400
 
-        # Handle GCS vs traditional file upload
-        if from_gcs:
-            # Handle GCS path processing
-            gcs_path = request.form.get('gcsPath')
-            if not gcs_path:
-                return jsonify({"error": "GCS path is required when fromGCS=true"}), 400
+        # Handle S3/GCS vs traditional file upload
+        if from_cloud_storage:
+            # Get storage path (support both s3Path and gcsPath for backward compatibility)
+            storage_path = request.form.get('s3Path') or request.form.get('gcsPath')
+            if not storage_path:
+                return jsonify({"error": "s3Path or gcsPath is required when fromS3=true or fromGCS=true"}), 400
 
-            print(f"☁️ V3 Processing GCS file: {gcs_path}")
-            
-            # Extract file info from GCS path
-            filename = gcs_path.split('/')[-1]  # Get filename from path
+            print(f"☁️ V3 Processing cloud storage file: {storage_path}")
+
+            # Extract file info from storage path
+            filename = storage_path.split('/')[-1]  # Get filename from path
             if not filename:
-                return jsonify({"error": "Invalid GCS path - cannot extract filename"}), 400
-            
-            # Download file from GCS to process it
-            file_content = download_from_gcs(gcs_path)
+                return jsonify({"error": "Invalid storage path - cannot extract filename"}), 400
+
+            # Download file from S3/GCS to process it
+            from s3_utils import download_file_from_s3
+            try:
+                file_content = download_file_from_s3(storage_path)
+            except Exception as e:
+                print(f"❌ Failed to download from cloud storage: {e}")
+                return jsonify({"error": f"Failed to download file from cloud storage: {str(e)}"}), 500
+
             if not file_content:
-                return jsonify({"error": "Failed to download file from GCS"}), 500
-            
-            # Save GCS content to temporary file
+                return jsonify({"error": "Failed to download file from cloud storage"}), 500
+
+            # Save content to temporary file
             timestamp = int(time.time())
             safe_filename = f"{file_id}_{filename}"
             save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
-            
+
             with open(save_path, 'wb') as f:
                 f.write(file_content)
-            print(f"✅ V3 GCS file saved locally: {save_path}")
+            print(f"✅ V3 Cloud storage file saved locally: {save_path}")
             
         else:
             # Traditional file upload handling
