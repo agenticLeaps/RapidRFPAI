@@ -21,9 +21,16 @@ except ImportError:
     print("⚠️ python-docx not installed. DOCX files will need conversion.")
 
 
-# Initialize GCS client with proper credential handling
+# Initialize storage client - now uses S3 by default
+def get_s3_client():
+    """Get S3 client with credentials from environment"""
+    from s3_utils import get_s3_client as _get_s3_client
+    return _get_s3_client()
+
+
+# Legacy GCS client for backward compatibility
 def get_gcs_client():
-    """Get GCS client with proper credential handling"""
+    """Get GCS client with proper credential handling (legacy)"""
     cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
 
     if cred_path.startswith("{"):
@@ -81,37 +88,53 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     return "\n\n".join(text_parts)
 
 
-def download_file_from_gcs(gcs_url: str, temp_dir: str) -> tuple[str, str]:
+def download_file_from_gcs(storage_url: str, temp_dir: str) -> tuple[str, str]:
     """
-    Download a file from Google Cloud Storage to a temporary directory
+    Download a file from S3 or GCS to a temporary directory (backward compatible)
 
     Args:
-        gcs_url: GCS URL (gs://bucket/path/to/file)
+        storage_url: S3 URL (s3://bucket/path) or GCS URL (gs://bucket/path)
         temp_dir: Temporary directory to save the file
 
     Returns:
         Tuple of (local_file_path, filename)
     """
-    if not gcs_url.startswith('gs://'):
-        raise ValueError(f"Invalid GCS URL: {gcs_url}")
+    # Handle S3 URLs
+    if storage_url.startswith('s3://') or '.s3.' in storage_url or 's3.amazonaws.com' in storage_url:
+        from s3_utils import download_file_from_s3_to_temp
+        local_path, filename = download_file_from_s3_to_temp(storage_url, temp_dir)
+        print(f"✅ Downloaded {filename} from S3 to {local_path}")
+        return local_path, filename
 
-    # Parse GCS URL
-    parts = gcs_url.replace('gs://', '').split('/', 1)
-    bucket_name = parts[0]
-    file_path = parts[1] if len(parts) > 1 else ''
+    # Handle GCS URLs (legacy) - try S3 first
+    if storage_url.startswith('gs://'):
+        from s3_utils import download_file_from_s3_to_temp, get_bucket_name
 
-    # Download file using GCS client
-    gcs_client = get_gcs_client()
-    bucket = gcs_client.bucket(bucket_name)
-    blob = bucket.blob(file_path)
+        # Parse GCS URL
+        parts = storage_url.replace('gs://', '').split('/', 1)
+        file_path = parts[1] if len(parts) > 1 else ''
+        filename = os.path.basename(file_path)
 
-    filename = os.path.basename(file_path)
-    local_path = os.path.join(temp_dir, filename)
+        # Try S3 first
+        try:
+            s3_url = f"s3://{get_bucket_name()}/{file_path}"
+            local_path, filename = download_file_from_s3_to_temp(s3_url, temp_dir)
+            print(f"✅ Downloaded {filename} from S3 to {local_path}")
+            return local_path, filename
+        except FileNotFoundError:
+            # Fallback to GCS for legacy files
+            print(f"📦 File not in S3, trying GCS fallback...")
+            bucket_name = parts[0]
+            gcs_client = get_gcs_client()
+            bucket = gcs_client.bucket(bucket_name)
+            blob = bucket.blob(file_path)
 
-    blob.download_to_filename(local_path)
-    print(f"✅ Downloaded {filename} to {local_path}")
+            local_path = os.path.join(temp_dir, filename)
+            blob.download_to_filename(local_path)
+            print(f"✅ Downloaded {filename} from GCS (legacy) to {local_path}")
+            return local_path, filename
 
-    return local_path, filename
+    raise ValueError(f"Invalid storage URL: {storage_url}. Expected s3:// or gs://")
 
 
 def prepare_gemini_prompt() -> str:

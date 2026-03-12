@@ -130,27 +130,52 @@ class BaseExtractionAgent(ABC):
 
         return files_data
 
-    def _download_file_from_gcs(self, gcs_url: str, temp_dir: str) -> str:
-        """Download a file from GCS to temp directory"""
-        if not gcs_url.startswith('gs://'):
-            raise ValueError(f"Invalid GCS URL: {gcs_url}")
+    def _download_file_from_gcs(self, storage_url: str, temp_dir: str) -> str:
+        """Download a file from S3 or GCS to temp directory (backward compatible)"""
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        parts = gcs_url.replace('gs://', '').split('/', 1)
-        bucket_name = parts[0]
-        file_path = parts[1] if len(parts) > 1 else ''
+        # Handle S3 URLs
+        if storage_url.startswith('s3://') or '.s3.' in storage_url or 's3.amazonaws.com' in storage_url:
+            from s3_utils import download_file_from_s3_to_temp
+            local_path, filename = download_file_from_s3_to_temp(storage_url, temp_dir)
+            return local_path
 
-        gcs_client = self._get_gcs_client()
-        bucket = gcs_client.bucket(bucket_name)
-        blob = bucket.blob(file_path)
+        # Handle GCS URLs (legacy) - try S3 first
+        if storage_url.startswith('gs://'):
+            from s3_utils import download_file_from_s3_to_temp, get_bucket_name
 
-        filename = os.path.basename(file_path)
-        local_path = os.path.join(temp_dir, filename)
+            parts = storage_url.replace('gs://', '').split('/', 1)
+            file_path = parts[1] if len(parts) > 1 else ''
 
-        blob.download_to_filename(local_path)
-        return local_path
+            # Try S3 first
+            try:
+                s3_url = f"s3://{get_bucket_name()}/{file_path}"
+                local_path, filename = download_file_from_s3_to_temp(s3_url, temp_dir)
+                return local_path
+            except FileNotFoundError:
+                # Fallback to GCS for legacy files
+                bucket_name = parts[0]
+                gcs_client = self._get_gcs_client()
+                bucket = gcs_client.bucket(bucket_name)
+                blob = bucket.blob(file_path)
+
+                filename = os.path.basename(file_path)
+                local_path = os.path.join(temp_dir, filename)
+                blob.download_to_filename(local_path)
+                return local_path
+
+        raise ValueError(f"Invalid storage URL: {storage_url}. Expected s3:// or gs://")
+
+    def _get_s3_client(self):
+        """Get S3 client with credentials from environment"""
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from s3_utils import get_s3_client
+        return get_s3_client()
 
     def _get_gcs_client(self):
-        """Get GCS client with proper credential handling"""
+        """Get GCS client with proper credential handling (legacy)"""
         cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
 
         if cred_path.startswith("{"):

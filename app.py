@@ -5245,44 +5245,49 @@ def run_agent_v2():
         print(f"❌ V2 Agent startup error: {error_msg}")
         return jsonify({"error": "Internal server error", "details": error_msg}), 500
 
-def download_file_from_gcp(gcp_url):
-    """Download file from GCP URL"""
+def download_file_from_gcp(storage_url):
+    """Download file from S3 or GCP URL (backward compatible)"""
     try:
-        # Extract bucket and path from gs:// URL
-        if not gcp_url.startswith("gs://"):
-            raise Exception("Invalid GCP URL format")
-            
-        # Remove gs:// prefix
-        path = gcp_url[5:]
-        bucket_name = path.split('/')[0]
-        file_path = '/'.join(path.split('/')[1:])
-        
-        print(f"📥 Downloading from GCP: {bucket_name}/{file_path}")
-        
-        # Download using Google Cloud Storage client with credentials
-        from google.cloud import storage
-        
-        # For GCS buckets, use environment credentials (care-proposals-451406 project)
-        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
-        if cred_path.startswith("{"):
-            # JSON string from environment - this has bucket access
-            import json
-            from google.oauth2 import service_account
-            cred_dict = json.loads(cred_path)
-            bucket_credentials = service_account.Credentials.from_service_account_info(cred_dict)
-            client = storage.Client(credentials=bucket_credentials, project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
-            print("✅ Using environment credentials for GCS bucket access")
+        # Handle both S3 and legacy GCS URLs
+        if storage_url.startswith("s3://") or '.s3.' in storage_url or 's3.amazonaws.com' in storage_url:
+            # Use S3
+            from s3_utils import download_file_from_s3
+            print(f"📥 Downloading from S3: {storage_url}")
+            return download_file_from_s3(storage_url)
+
+        elif storage_url.startswith("gs://"):
+            # Legacy GCS URL - try S3 first with same path structure
+            from s3_utils import download_file_from_s3, get_bucket_name
+            # Convert gs:// to s3://
+            path = storage_url[5:]  # Remove gs://
+            parts = path.split('/', 1)
+            key = parts[1] if len(parts) > 1 else parts[0]
+            s3_url = f"s3://{get_bucket_name()}/{key}"
+            print(f"📥 Converting GCS URL to S3: {s3_url}")
+            try:
+                return download_file_from_s3(s3_url)
+            except FileNotFoundError:
+                # Fallback to GCS for legacy files
+                print(f"📥 File not in S3, trying GCS fallback: {storage_url}")
+                from google.cloud import storage
+                cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "fire.json")
+                if cred_path.startswith("{"):
+                    import json
+                    from google.oauth2 import service_account
+                    cred_dict = json.loads(cred_path)
+                    bucket_credentials = service_account.Credentials.from_service_account_info(cred_dict)
+                    client = storage.Client(credentials=bucket_credentials, project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+                else:
+                    client = storage.Client()
+                bucket_name = parts[0]
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(key)
+                return blob.download_as_bytes()
         else:
-            # Fallback to file path or default credentials
-            client = storage.Client()
-            print("✅ Using default/file credentials for GCS bucket access")
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(file_path)
-        
-        return blob.download_as_bytes()
-        
+            raise Exception("Invalid storage URL format. Expected s3:// or gs://")
+
     except Exception as e:
-        print(f"❌ GCP download error: {str(e)}")
+        print(f"❌ Storage download error: {str(e)}")
         return None
 
 def process_question_generator_v2(file_path, filename, agent_run_id, user_id):
@@ -7352,71 +7357,82 @@ def upload_file_v2():
             except:
                 pass
 
-def download_from_gcs(gcs_path):
-    """Download file content from GCS path"""
+def download_from_gcs(storage_path):
+    """Download file content from S3 or GCS path (backward compatible)"""
     try:
-        print(f"☁️ Downloading from GCS: {gcs_path}")
-        
-        # Remove gs:// prefix if present
-        if gcs_path.startswith('gs://'):
-            gcs_path = gcs_path[5:]
+        print(f"☁️ Downloading from storage: {storage_path}")
 
-        # Split bucket and object path
-        parts = gcs_path.split('/', 1)
-        if len(parts) < 2:
-            print(f"❌ Invalid GCS path format: {gcs_path}")
-            return None
-            
-        bucket_name = parts[0]
-        object_name = parts[1]
-        
-        print(f"📦 GCS Bucket: {bucket_name}, Object: {object_name}")
+        # Determine storage type
+        is_s3 = storage_path.startswith('s3://') or '.s3.' in storage_path or 's3.amazonaws.com' in storage_path
+        is_gcs = storage_path.startswith('gs://')
 
-        # Initialize Google Cloud Storage client with proper credentials
-        from google.cloud import storage
-        import json
-        
-        # Try to get credentials from environment
-        gcs_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        
-        if gcs_credentials:
-            # Check if it's a JSON string or file path
-            if gcs_credentials.startswith('{'):
-                # It's a JSON string - parse it
-                print("🔐 Using GCS credentials from environment (JSON)")
-                credentials_info = json.loads(gcs_credentials)
-                from google.oauth2 import service_account
-                credentials = service_account.Credentials.from_service_account_info(credentials_info)
-                client = storage.Client(credentials=credentials, project=credentials_info.get('project_id'))
-            else:
-                # It's a file path
-                print(f"🔐 Using GCS credentials from file: {gcs_credentials}")
-                client = storage.Client.from_service_account_json(gcs_credentials)
+        if is_s3:
+            # Use S3
+            from s3_utils import download_file_from_s3
+            file_content = download_file_from_s3(storage_path)
+            print(f"✅ Downloaded {len(file_content)} bytes from S3")
+            return file_content
+
+        elif is_gcs:
+            # Legacy GCS URL - try S3 first
+            from s3_utils import download_file_from_s3, get_bucket_name
+
+            # Parse GCS path
+            gcs_path_clean = storage_path[5:] if storage_path.startswith('gs://') else storage_path
+            parts = gcs_path_clean.split('/', 1)
+            if len(parts) < 2:
+                print(f"❌ Invalid storage path format: {storage_path}")
+                return None
+
+            object_name = parts[1]
+
+            # Try S3 first
+            s3_url = f"s3://{get_bucket_name()}/{object_name}"
+            print(f"📦 Trying S3: {s3_url}")
+
+            try:
+                file_content = download_file_from_s3(s3_url)
+                print(f"✅ Downloaded {len(file_content)} bytes from S3")
+                return file_content
+            except FileNotFoundError:
+                # Fallback to GCS for legacy files
+                print(f"📦 File not in S3, trying GCS fallback...")
+                from google.cloud import storage
+                import json
+
+                bucket_name = parts[0]
+                gcs_credentials = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+                if gcs_credentials and gcs_credentials.startswith('{'):
+                    credentials_info = json.loads(gcs_credentials)
+                    from google.oauth2 import service_account
+                    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                    client = storage.Client(credentials=credentials, project=credentials_info.get('project_id'))
+                elif gcs_credentials:
+                    client = storage.Client.from_service_account_json(gcs_credentials)
+                else:
+                    client = storage.Client()
+
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(object_name)
+
+                if not blob.exists():
+                    print(f"❌ Object does not exist in GCS: {storage_path}")
+                    return None
+
+                file_content = blob.download_as_bytes()
+                print(f"✅ Downloaded {len(file_content)} bytes from GCS (legacy)")
+                return file_content
         else:
-            # Try default credentials (for GCP environments)
-            print("🔐 Using default GCS credentials")
-            client = storage.Client()
-        
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(object_name)
-        
-        # Check if blob exists
-        if not blob.exists():
-            print(f"❌ GCS object does not exist: {gcs_path}")
-            return None
+            # Assume it's a relative path, try S3 with default bucket
+            from s3_utils import download_file_from_s3, get_bucket_name
+            s3_url = f"s3://{get_bucket_name()}/{storage_path}"
+            file_content = download_file_from_s3(s3_url)
+            print(f"✅ Downloaded {len(file_content)} bytes from S3")
+            return file_content
 
-        file_content = blob.download_as_bytes()
-        print(f"✅ Downloaded {len(file_content)} bytes from GCS")
-        return file_content
-
-    except ImportError:
-        print("❌ Google Cloud Storage client not available. Install: pip install google-cloud-storage")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"❌ Invalid JSON in GCS credentials: {e}")
-        return None
     except Exception as e:
-        print(f"❌ Error downloading from GCS: {e}")
+        print(f"❌ Error downloading from storage: {e}")
         return None
 
 def call_noderag_service(org_id, file_id, user_id, chunks, page_count=None):
