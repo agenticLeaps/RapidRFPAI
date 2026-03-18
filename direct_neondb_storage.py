@@ -337,86 +337,41 @@ def process_file_direct_storage_project_support(file_path: str, file_id: str, or
 
 def process_file_direct_storage(file_path: str, file_id: str, org_id: str, user_id: str, filename: str) -> Dict[str, Any]:
     """Process file using LlamaParse + direct storage method"""
-    print(f"📄 Direct processing with LlamaParse: {filename}")
-    
+    print(f"📄 Direct processing with Docling: {filename}")
+
     # Get file extension to determine processing method
     file_ext = filename.split('.')[-1].lower()
     documents = []
-    
-    # Use LlamaParse for complex file types, fallback to LlamaIndex for simple ones
-    llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
-    
     page_count = None  # Initialize page count variable
 
-    if file_ext in llamaparse_supported:
-        print(f"🚀 Using LlamaParse for {file_ext.upper()} file")
-        try:
-            from llamaparse_ssl_fix import parse_document_with_metadata
+    # Use Docling parser for all supported formats
+    from docling_parser import parse_document_with_docling, UnsupportedFormatError
 
-            # Parse the document with metadata
-            print(f"📊 Parsing {filename} with LlamaParse...")
-            print(f"🔄 About to call parser with metadata extraction")
-            parse_result = parse_document_with_metadata(
-                file_path=file_path,
-                api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
-                result_type="markdown",
-                verbose=True,
-                language="en"
-            )
+    try:
+        print(f"📊 Parsing {filename} with Docling...")
+        parse_result = parse_document_with_docling(file_path=file_path)
 
-            documents = parse_result.get("documents", [])
-            page_count = parse_result.get("page_count")
+        documents = parse_result.get("documents", [])
+        page_count = parse_result.get("page_count")
 
-            print(f"✅ parser completed successfully")
-            print(f"📄 LlamaParse loaded {len(documents)} document(s)")
-            if page_count:
-                print(f"📊 Total pages parsed: {page_count}")
+        print(f"✅ Docling completed successfully")
+        print(f"📄 Docling loaded {len(documents)} document(s)")
+        if page_count:
+            print(f"📊 Total pages parsed: {page_count}")
 
-            if documents:
-                print(f"📝 First document preview: {documents[0].text[:200]}...")
+        if documents:
+            print(f"📝 First document preview: {documents[0].text[:200]}...")
 
-        except Exception as e:
-            print(f"⚠️ LlamaParse failed: {str(e)}")
-            print(f"🔄 Falling back to LlamaIndex readers...")
-            documents = []
-    
-    # Fallback to LlamaIndex readers for simple files or if LlamaParse fails
+    except UnsupportedFormatError as e:
+        print(f"❌ {str(e)}")
+        return None
+    except Exception as e:
+        print(f"❌ Docling parsing failed: {str(e)}")
+        return None
+
     if not documents:
-        try:
-            from llama_index.readers.file import UnstructuredReader
-            from llama_index.core import Document
-            
-            print(f"📖 Using LlamaIndex UnstructuredReader for {filename}")
-            reader = UnstructuredReader()
-            
-            # Load document
-            documents = reader.load_data(file=file_path)
-            print(f"📄 Loaded {len(documents)} document(s)")
-            
-            if documents:
-                print(f"📝 First document preview: {documents[0].text[:200]}...")
-                
-        except Exception as e:
-            print(f"⚠️ LlamaIndex parsing also failed: {str(e)}")
-            print(f"🔄 Using simple text reading...")
-            
-            # Final fallback - simple text reading with proper encoding handling
-            try:
-                # Try UTF-8 first
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                try:
-                    # Try latin-1 if UTF-8 fails
-                    with open(file_path, 'r', encoding='latin-1') as f:
-                        content = f.read()
-                except UnicodeDecodeError:
-                    # For binary files, just extract basic info
-                    content = f"Binary file: {filename} (size: {os.path.getsize(file_path)} bytes)"
-            
-            from llama_index.core import Document
-            documents = [Document(text=content)]
-            print(f"📄 Created document from simple text reading")
+        print(f"❌ No documents extracted from {filename}")
+        return None
     
     # Add metadata to documents
     for doc in documents:

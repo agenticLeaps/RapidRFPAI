@@ -96,15 +96,14 @@ celery==5.3.4
 flower==2.0.1
 kombu==5.3.4
 
-# LlamaIndex + NeonDB Dependencies
+# LlamaIndex + NeonDB Dependencies (Docling replaces LlamaParse)
 llama-index>=0.10.0
 llama-index-vector-stores-postgres
 llama-index-embeddings-huggingface
 llama-index-llms-huggingface
-llama-index-readers-file
-llama-parse>=0.4.0
-unstructured[pdf]>=0.15.15
-python-magic>=0.4.27
+# llama-parse removed - using Docling service instead
+# unstructured removed - using Docling service instead
+tabulate>=0.9.0
 asyncpg>=0.29.0
 sqlalchemy>=2.0.0
 pgvector>=0.3.0

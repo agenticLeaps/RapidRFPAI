@@ -7733,66 +7733,35 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
 
         print(f"📄 Extracting chunks using v1 pipeline for NodeRAG...")
 
-        # Temporarily modify the direct storage function to return chunks
-        # We'll extract the chunking logic
+        # Extract the chunking logic - use Docling parser
         file_ext = filename.split('.')[-1].lower()
         documents = []
         page_count = None  # Initialize page count
 
-        # Use the same logic as in direct_neondb_storage.py
-        llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
+        # Use Docling parser for supported formats
+        from docling_parser import parse_document_with_docling, UnsupportedFormatError
 
-        if file_ext in llamaparse_supported:
-            try:
-                from llamaparse_ssl_fix import parse_document_with_metadata
+        try:
+            print(f"📊 Parsing {filename} with Docling...")
+            parse_result = parse_document_with_docling(file_path=file_path)
 
-                print(f"📊 Parsing {filename} with LlamaParse for NodeRAG...")
-                parse_result = parse_document_with_metadata(
-                    file_path=file_path,
-                    api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
-                    result_type="markdown",
-                    verbose=True,
-                    language="en"
-                )
+            documents = parse_result.get("documents", [])
+            page_count = parse_result.get("page_count")
 
-                documents = parse_result.get("documents", [])
-                page_count = parse_result.get("page_count")
+            print(f"✅ Docling loaded {len(documents)} document(s)")
+            if page_count:
+                print(f"📊 Total pages parsed: {page_count}")
 
-                print(f"✅ LlamaParse loaded {len(documents)} document(s)")
-                if page_count:
-                    print(f"📊 Total pages parsed: {page_count}")
+        except UnsupportedFormatError as e:
+            print(f"❌ {str(e)}")
+            return None
+        except Exception as e:
+            print(f"❌ Docling parsing failed: {str(e)}")
+            return None
 
-            except Exception as e:
-                print(f"⚠️ LlamaParse failed: {str(e)}")
-                documents = []
-        
-        # Fallback to LlamaIndex readers if LlamaParse failed
         if not documents:
-            try:
-                from llama_index.readers.file import UnstructuredReader
-                from llama_index.core import Document
-
-                print(f"📖 Trying LlamaIndex UnstructuredReader as fallback...")
-                reader = UnstructuredReader()
-                documents = reader.load_data(file=file_path)
-                print(f"✅ Fallback: Loaded {len(documents)} document(s)")
-
-            except Exception as fallback_error:
-                print(f"⚠️ LlamaIndex fallback also failed: {fallback_error}")
-                # Last resort - try simple text reading for text files only
-                if file_ext not in llamaparse_supported:
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        from llama_index.core import Document
-                        documents = [Document(text=content)]
-                        print(f"✅ Simple text reading succeeded")
-                    except Exception as text_error:
-                        print(f"❌ All extraction methods failed: {text_error}")
-                        return None
-                else:
-                    print(f"❌ Cannot extract content from {file_ext} file - all methods failed")
-                    return None
+            print(f"❌ No documents extracted from {filename}")
+            return None
         
         # Add metadata to documents
         for doc in documents:
@@ -8947,7 +8916,7 @@ def get_file_status_v2():
 
 @app.route("/process-project-support-embedding", methods=["POST", "OPTIONS"])
 def process_project_support_embedding():
-    """Process embeddings for project support documents using V3 approach (LlamaParse + HF + NeonDB)"""
+    """Process embeddings for project support documents using V3 approach (Docling + HF + NeonDB)"""
     if request.method == "OPTIONS":
         return "", 200
         
@@ -8989,8 +8958,8 @@ def process_project_support_embedding():
                 if user_id:
                     notify_backend_status(file_id, user_id, "extracting", False)
                 
-                # Use V3 approach: LlamaParse + HF embeddings + NeonDB storage
-                print(f"🚀 V3 Project Support: Starting LlamaParse processing...")
+                # Use V3 approach: Docling + HF embeddings + NeonDB storage
+                print(f"🚀 V3 Project Support: Starting Docling processing...")
                 from direct_neondb_storage import process_file_direct_storage_project_support
                 
                 result = process_file_direct_storage_project_support(
