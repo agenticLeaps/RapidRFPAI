@@ -43,7 +43,7 @@ jiter==0.10.0
 lxml==5.4.0
 MarkupSafe==3.0.2
 msgpack==1.1.0
-numpy==2.2.6
+numpy>=1.24.0,<2
 # openai removed - using Bedrock Cohere embeddings instead
 openpyxl==3.1.5
 packaging==25.0
