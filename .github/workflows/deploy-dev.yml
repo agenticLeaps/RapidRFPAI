@@ -20,7 +20,7 @@ jobs:
         REMOTE_HOST: ${{ secrets.RAPIDRFPAI_DEV_HOST }}
         REMOTE_USER: ubuntu
         TARGET: /home/ubuntu/rapidrfpai/
-        EXCLUDE: ".git, .gitignore, venv/, __pycache__/, *.pyc, .env, logs/, uploads/, .github/"
+        EXCLUDE: ".git, .gitignore, venv/, __pycache__/, *.pyc, .env, .env.*, .env.development, .env.production, logs/, uploads/, .github/"
         SCRIPT_BEFORE: |
           echo "Starting deployment..."
         SCRIPT_AFTER: |
