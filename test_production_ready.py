@@ -83,7 +83,9 @@ def test_environment_config():
     required_vars = [
         'UPSTASH_REDIS_REST_URL',
         'UPSTASH_REDIS_REST_TOKEN',
-        'OPENAI_API_KEY',
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_REGION',
         'PINECONE_API_KEY'
     ]
     

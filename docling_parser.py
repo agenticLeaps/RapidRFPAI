@@ -10,7 +10,7 @@ import tempfile
 import subprocess
 import pandas as pd
 from typing import Dict, Any, List
-from llama_index.core import Document
+from text_chunker import SimpleDocument as Document
 
 DOCLING_URL = os.getenv("DOCLING_SERVICE_URL", "http://parsing.rapidrfp.ai:5001")
 

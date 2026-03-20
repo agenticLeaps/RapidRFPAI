@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 """
-LLM integration for ChatGPT (OpenAI) model
+LLM integration for AWS Bedrock Claude
+Replaces OpenAI ChatGPT with Bedrock Claude for all LLM operations
 """
 import os
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class ChatGPTLLMClient:
-    def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("OPENAI_API_KEY not found in environment")
+# Import Bedrock client
+try:
+    from bedrock_client import claude, BEDROCK_AVAILABLE
+except ImportError:
+    BEDROCK_AVAILABLE = False
+    claude = None
+    print("⚠️ Bedrock client not available for LLM integration")
 
-        self.base_url = "https://api.openai.com/v1"
-        self.model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+
+class BedrockLLMClient:
+    """Bedrock Claude LLM client - replaces ChatGPTLLMClient"""
+
+    def __init__(self):
+        if not BEDROCK_AVAILABLE or not claude:
+            raise RuntimeError("Bedrock client not available. Check AWS credentials.")
+        self.model = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
     def _parse_conversation_history(self, conversation_history: str) -> list:
         """
-        Parse conversation history string into OpenAI message format
+        Parse conversation history string into message format
 
         Expected formats:
         1. "user: message\nassistant: response\nuser: next message\n..."
@@ -91,17 +100,17 @@ class ChatGPTLLMClient:
             })
 
         return messages
-    
+
     def generate_answer(
         self,
         query: str,
         context: str = "",
         conversation_history: str = "",
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
         """
-        Generate answer using ChatGPT with optional context (RAG)
+        Generate answer using Bedrock Claude with optional context (RAG)
 
         Args:
             query: User question
@@ -113,19 +122,15 @@ class ChatGPTLLMClient:
         Returns:
             Dictionary with answer and metadata
         """
-        print(f"🤖 Generating answer for: '{query[:100]}...'")
+        print(f"🤖 Generating answer with Bedrock Claude for: '{query[:100]}...'")
         print(f"📝 Context length: {len(context)} chars")
         print(f"💬 Conversation history length: {len(conversation_history)} chars")
-        
-        try:
-            # Prepare messages for ChatGPT
-            messages = []
 
+        try:
+            # Build the system prompt
             if context:
                 # Fetch prompt from API with fallback
                 try:
-                    import requests
-                    import os
                     backend_api_url = os.environ.get("BACKEND_API_URL", "http://localhost:8083")
                     response = requests.get(f"{backend_api_url}/api/prompts/chat", timeout=5)
                     if response.status_code == 200:
@@ -148,8 +153,6 @@ Your job is to produce a clear, concise, professional, and compliant response ba
 
 You must follow all rules exactly.
 
-⸻
-
 CORE RULES
     •    Use only the provided relevant text as your source of truth.
 If the text contradicts general knowledge, the text wins.
@@ -165,221 +168,167 @@ Only clarify using the text + universal common knowledge.
     •    Do not restate or summarize the entire text—only extract what is required to answer the question.
     •    If there are conflicting statements in the text, choose the strictest and safest interpretation.
 
-⸻
-
 WHEN INFORMATION IS MISSING
 
 If the relevant text does not contain enough information to answer the question, respond with:
 
 "I'm unable to answer this from the provided company knowledge. Please provide additional context or keywords so I can assist further."
 
-⸻
-
 Context:
 {context}"""
-
-                messages.append({"role": "system", "content": system_message})
             else:
                 # Simple mode without context
-                messages.append({"role": "system", "content": "You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services. Provide clear, concise, and professional responses."})
+                system_message = "You are the AI assistant inside RapidRFP, an application that helps users provide accurate information about their products and services. Provide clear, concise, and professional responses."
 
-            # Parse and add conversation history as proper message pairs
+            # Build the prompt with conversation history
+            full_prompt = ""
             if conversation_history:
                 history_messages = self._parse_conversation_history(conversation_history)
-                messages.extend(history_messages)
+                for msg in history_messages:
+                    role_label = "Human" if msg["role"] == "user" else "Assistant"
+                    full_prompt += f"{role_label}: {msg['content']}\n\n"
                 print(f"📝 Added {len(history_messages)} messages from conversation history")
 
             # Add current query
-            messages.append({"role": "user", "content": query})
-            
-            # Call OpenAI API
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
+            full_prompt += f"Human: {query}\n\nAssistant:"
+
+            # Call Bedrock Claude
+            result = claude.call_claude(
+                prompt=full_prompt,
+                system=system_message,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format="text"
+            )
+
+            answer = result.get("text", "").strip()
+            print(f"✅ Generated answer: {len(answer)} chars")
+            print(f"📋 Answer preview: {answer[:150]}...")
+
+            return {
+                "success": True,
+                "answer": answer,
+                "query": query,
+                "context_used": len(context) > 0,
+                "context_length": len(context),
+                "model": self.model,
+                "parameters": {
                     "max_tokens": max_tokens,
                     "temperature": temperature
-                },
-                timeout=60
-            )
-            
-            print(f"📊 OpenAI API Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                answer = result["choices"][0]["message"]["content"]
-                
-                print(f"✅ Generated answer: {len(answer)} chars")
-                print(f"📋 Answer preview: {answer[:150]}...")
-                
-                return {
-                    "success": True,
-                    "answer": answer,
-                    "query": query,
-                    "context_used": len(context) > 0,
-                    "context_length": len(context),
-                    "model": self.model,
-                    "parameters": {
-                        "max_tokens": max_tokens,
-                        "temperature": temperature
-                    },
-                    "usage": result.get("usage", {})
                 }
-            else:
-                error_msg = f"OpenAI API error: {response.status_code}"
-                try:
-                    error_detail = response.json().get("error", {}).get("message", response.text)
-                    error_msg += f" - {error_detail}"
-                except:
-                    error_msg += f" - {response.text}"
-                
-                print(f"❌ {error_msg}")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "query": query
-                }
-                
-        except requests.exceptions.RequestException as e:
-            error_msg = f"OpenAI API request failed: {str(e)}"
-            print(f"❌ {error_msg}")
-            return {
-                "success": False,
-                "error": error_msg,
-                "query": query
             }
+
         except Exception as e:
-            error_msg = f"ChatGPT generation error: {str(e)}"
+            error_msg = f"Bedrock Claude generation error: {str(e)}"
             print(f"❌ {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
                 "query": query
             }
-    
+
     def simple_generate(
-        self, 
-        prompt: str, 
-        max_tokens: int = 512,
+        self,
+        prompt: str,
+        max_tokens: int = 4096,
         temperature: float = 0.7
     ) -> Dict[str, Any]:
         """
         Simple text generation without RAG context
-        
+
         Args:
             prompt: Text prompt
             max_tokens: Maximum response tokens
             temperature: Sampling temperature
-            
+
         Returns:
             Dictionary with response and metadata
         """
-        print(f"🔤 Simple generation for: '{prompt[:100]}...'")
-        
+        print(f"🔤 Simple generation with Bedrock Claude for: '{prompt[:100]}...'")
+
         try:
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ]
-            
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
+            result = claude.call_claude(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format="text"
+            )
+
+            response_text = result.get("text", "").strip()
+            print(f"✅ Generated response: {len(response_text)} chars")
+
+            return {
+                "success": True,
+                "response": response_text,
+                "prompt": prompt,
+                "model": self.model,
+                "parameters": {
                     "max_tokens": max_tokens,
                     "temperature": temperature
-                },
-                timeout=60
-            )
-            
-            print(f"📊 OpenAI API Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                response_text = result["choices"][0]["message"]["content"]
-                
-                print(f"✅ Generated response: {len(response_text)} chars")
-                
-                return {
-                    "success": True,
-                    "response": response_text,
-                    "prompt": prompt,
-                    "model": self.model,
-                    "parameters": {
-                        "max_tokens": max_tokens,
-                        "temperature": temperature
-                    },
-                    "usage": result.get("usage", {})
                 }
-            else:
-                error_msg = f"OpenAI API error: {response.status_code}"
-                try:
-                    error_detail = response.json().get("error", {}).get("message", response.text)
-                    error_msg += f" - {error_detail}"
-                except:
-                    error_msg += f" - {response.text}"
-                
-                print(f"❌ {error_msg}")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "prompt": prompt
-                }
-                
+            }
+
         except Exception as e:
-            error_msg = f"ChatGPT generation error: {str(e)}"
+            error_msg = f"Bedrock Claude generation error: {str(e)}"
             print(f"❌ {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
                 "prompt": prompt
             }
-    
+
     def health_check(self) -> Dict[str, Any]:
-        """Check if OpenAI API is accessible"""
+        """Check if Bedrock Claude is accessible"""
         try:
-            response = requests.get(
-                f"{self.base_url}/models",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=10
+            if not BEDROCK_AVAILABLE or not claude:
+                return {
+                    "healthy": False,
+                    "endpoint": "AWS Bedrock",
+                    "error": "Bedrock client not available"
+                }
+
+            # Try a simple generation to verify connectivity
+            result = claude.call_claude(
+                prompt="Say 'ok' if you can hear me.",
+                max_tokens=10,
+                temperature=0,
+                response_format="text"
             )
-            if response.status_code == 200:
+
+            if result.get("text"):
                 return {
                     "healthy": True,
-                    "endpoint": self.base_url,
+                    "endpoint": "AWS Bedrock",
                     "model": self.model,
-                    "status": "OpenAI API accessible"
+                    "status": "Bedrock Claude accessible"
                 }
             else:
                 return {
                     "healthy": False,
-                    "endpoint": self.base_url,
-                    "error": f"Status {response.status_code}"
+                    "endpoint": "AWS Bedrock",
+                    "error": "Empty response from Claude"
                 }
+
         except Exception as e:
             return {
                 "healthy": False,
-                "endpoint": self.base_url,
+                "endpoint": "AWS Bedrock",
                 "error": str(e)
             }
 
+
+# Backwards compatibility alias
+ChatGPTLLMClient = BedrockLLMClient
+
+
 # Convenience functions
 def generate_rag_answer(query: str, context: str = "", conversation_history: str = "", **kwargs) -> Dict[str, Any]:
-    """Generate RAG answer using ChatGPT"""
-    client = ChatGPTLLMClient()
+    """Generate RAG answer using Bedrock Claude"""
+    client = BedrockLLMClient()
     return client.generate_answer(query, context, conversation_history, **kwargs)
 
+
 def generate_simple_response(prompt: str, **kwargs) -> Dict[str, Any]:
-    """Generate simple response using ChatGPT"""
-    client = ChatGPTLLMClient()
+    """Generate simple response using Bedrock Claude"""
+    client = BedrockLLMClient()
     return client.simple_generate(prompt, **kwargs)
