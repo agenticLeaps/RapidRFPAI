@@ -19,14 +19,14 @@ google-api-core==2.24.2
 google-api-python-client==2.170.0
 google-auth==2.40.2
 google-auth-httplib2==0.2.0
-google-cloud-aiplatform==1.94.0
+# google-cloud-aiplatform removed - using Bedrock instead
 google-cloud-bigquery==3.33.0
 google-cloud-core==2.4.3
 google-cloud-firestore==2.20.2
 google-cloud-resource-manager==1.14.2
 google-cloud-storage==2.19.0
 google-crc32c==1.7.1
-google-genai==1.16.1
+# google-genai removed - using Bedrock Claude instead
 google-resumable-media==2.7.2
 googleapis-common-protos==1.70.0
 grpc-google-iam-v1==0.14.2
@@ -44,7 +44,7 @@ lxml==5.4.0
 MarkupSafe==3.0.2
 msgpack==1.1.0
 numpy==2.2.6
-openai==1.82.0
+# openai removed - using Bedrock Cohere embeddings instead
 openpyxl==3.1.5
 packaging==25.0
 pandas==2.2.3
@@ -68,7 +68,7 @@ python-pptx==1.0.2
 pytz==2025.2
 requests==2.32.3
 rsa==4.9.1
-sentence-transformers==3.3.1
+# sentence-transformers removed - using Bedrock Cohere embeddings instead
 rank-bm25==0.2.2
 scikit-learn==1.5.2
 nltk==3.9.1
@@ -96,20 +96,17 @@ celery==5.3.4
 flower==2.0.1
 kombu==5.3.4
 
-# LlamaIndex + NeonDB Dependencies
-llama-index>=0.10.0
-llama-index-vector-stores-postgres
-llama-index-embeddings-huggingface
-llama-index-llms-huggingface
-llama-index-readers-file
-llama-parse>=0.4.0
-unstructured[pdf]>=0.15.15
-python-magic>=0.4.27
+# NeonDB Direct Storage Dependencies (Docling + Bedrock Cohere)
+# llama-index removed - using direct NeonDB storage with custom text chunker
+# llama-index-vector-stores-postgres removed - using asyncpg directly
+# llama-parse removed - using Docling service instead
+# unstructured removed - using Docling service instead
+tabulate>=0.9.0
 asyncpg>=0.29.0
 sqlalchemy>=2.0.0
 pgvector>=0.3.0
 requests>=2.31.0
-gradio_client>=0.7.0
+# gradio_client removed - using Bedrock Claude instead
 nest-asyncio>=1.5.0
 
 # AWS Bedrock for Claude

@@ -428,5 +428,96 @@ class BedrockClaude:
             return {"error": "Failed to parse response", "raw": text[:500]}
 
 
-# Create singleton instance
+class BedrockCohereEmbeddings:
+    """Cohere Embeddings client using AWS Bedrock"""
+
+    EMBED_ENGLISH_V3 = "cohere.embed-english-v3"
+    EMBED_MULTILINGUAL_V3 = "cohere.embed-multilingual-v3"
+
+    def __init__(self, model_id: str = None):
+        self.client = get_bedrock_client()
+        self.model_id = model_id or os.environ.get("BEDROCK_EMBEDDING_MODEL", self.EMBED_ENGLISH_V3)
+        self.embedding_dimension = 1024  # Cohere v3 dimension
+        self.max_batch_size = 96  # Cohere max batch size
+
+    def get_embeddings(
+        self,
+        texts: List[str],
+        input_type: str = "search_document",
+        batch_size: int = None
+    ) -> List[List[float]]:
+        """
+        Get embeddings for a list of texts using Cohere embed-english-v3.
+
+        Args:
+            texts: List of texts to embed
+            input_type: "search_document" for indexing, "search_query" for queries
+            batch_size: Batch size (max 96)
+
+        Returns:
+            List of embedding vectors (1024 dimensions each)
+        """
+        if not self.client:
+            raise RuntimeError("Bedrock client not initialized. Check AWS credentials.")
+
+        if not texts:
+            return []
+
+        # Cohere has a 2048 character limit per text - truncate if needed
+        MAX_TEXT_LENGTH = 2048
+        truncated_texts = []
+        for text in texts:
+            if len(text) > MAX_TEXT_LENGTH:
+                truncated_texts.append(text[:MAX_TEXT_LENGTH])
+            else:
+                truncated_texts.append(text)
+        texts = truncated_texts
+
+        if batch_size is None:
+            batch_size = min(self.max_batch_size, len(texts))
+
+        all_embeddings = []
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+
+            body = {
+                "texts": batch,
+                "input_type": input_type,
+                "truncate": "END"
+            }
+
+            try:
+                response = self.client.invoke_model(
+                    modelId=self.model_id,
+                    body=json.dumps(body)
+                )
+
+                result = json.loads(response["body"].read())
+                embeddings = result.get("embeddings", [])
+
+                if embeddings and len(embeddings) == len(batch):
+                    all_embeddings.extend(embeddings)
+                    print(f"✅ Embedded batch {i // batch_size + 1}: {len(batch)} texts")
+                else:
+                    print(f"⚠️ Unexpected embedding result for batch {i // batch_size + 1}")
+                    all_embeddings.extend([[0.0] * self.embedding_dimension for _ in batch])
+
+            except Exception as e:
+                print(f"❌ Embedding error for batch {i // batch_size + 1}: {e}")
+                all_embeddings.extend([[0.0] * self.embedding_dimension for _ in batch])
+
+        return all_embeddings
+
+    def get_query_embedding(self, query: str) -> List[float]:
+        """
+        Get embedding for a search query.
+        Uses input_type="search_query" for better retrieval.
+        """
+        embeddings = self.get_embeddings([query], input_type="search_query")
+        return embeddings[0] if embeddings else [0.0] * self.embedding_dimension
+
+
+# Create singleton instances
 claude = BedrockClaude()
+cohere_embeddings = BedrockCohereEmbeddings()

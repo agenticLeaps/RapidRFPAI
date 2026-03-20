@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Retrieval system for NeonDB vector search
+Uses AWS Bedrock Cohere embeddings (1024 dimensions)
 """
 import os
 import asyncpg
@@ -8,15 +9,29 @@ import asyncio
 import json
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
-from simple_custom_embedding import get_embedding_from_hf_endpoint
+
+# Import Bedrock Cohere embeddings
+try:
+    from bedrock_client import cohere_embeddings, BEDROCK_AVAILABLE
+except ImportError:
+    BEDROCK_AVAILABLE = False
+    cohere_embeddings = None
+    print("⚠️ Bedrock client not available for retrieval system")
 
 load_dotenv()
 
+
+def get_embedding_from_cohere(text: str) -> List[float]:
+    """Get embedding for a single text using Bedrock Cohere"""
+    if not BEDROCK_AVAILABLE or not cohere_embeddings:
+        raise RuntimeError("Bedrock Cohere embeddings not available")
+    return cohere_embeddings.get_query_embedding(text)
+
 class NeonDBRetrieval:
     def __init__(self):
-        self.db_url = os.getenv("NEON_DATABASE_URL")
+        self.db_url = os.getenv("DATABASE_URL")
         if not self.db_url:
-            raise ValueError("NEON_DATABASE_URL not found")
+            raise ValueError("DATABASE_URL not found")
     
     async def search_similar_chunks(
         self, 
@@ -41,9 +56,9 @@ class NeonDBRetrieval:
         """
         print(f"🔍 Searching for: '{query[:100]}...' (top_k={top_k})")
         
-        # Get query embedding
-        print("🧮 Generating query embedding...")
-        query_embedding = get_embedding_from_hf_endpoint(query)
+        # Get query embedding using Bedrock Cohere
+        print("🧮 Generating query embedding with Cohere...")
+        query_embedding = get_embedding_from_cohere(query)
         query_embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
         
         # Build SQL query with filters

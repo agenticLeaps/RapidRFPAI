@@ -2,6 +2,7 @@
 """
 LlamaIndex integration with NeonDB PostgreSQL
 Handles document processing, embedding, and retrieval
+Uses AWS Bedrock Cohere embeddings (1024 dimensions)
 """
 import os
 from typing import List, Dict, Any, Optional
@@ -11,8 +12,6 @@ from dotenv import load_dotenv
 from llama_index.core import Document, VectorStoreIndex, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.postgres import PGVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.huggingface import HuggingFaceLLM
 from llama_index.readers.file import PDFReader, DocxReader, UnstructuredReader
 
 # Standard libraries
@@ -21,112 +20,94 @@ import shutil
 import requests
 import json
 
+# Import Bedrock Cohere embeddings
+try:
+    from bedrock_client import cohere_embeddings, claude, BEDROCK_AVAILABLE
+except ImportError:
+    BEDROCK_AVAILABLE = False
+    cohere_embeddings = None
+    claude = None
+    print("⚠️ Bedrock client not available for LlamaIndex integration")
+
 load_dotenv()
 
 class LlamaIndexProcessor:
     """LlamaIndex processor for document handling and retrieval"""
-    
+
     def __init__(self):
         self.setup_models()
         self.setup_vector_store()
         self.setup_parsers()
-    
+
     def setup_models(self):
-        """Initialize embedding and LLM models"""
-        print("🤖 Initializing models...")
-        print(f"🔧 Environment check - HF_TOKEN: {os.getenv('HF_TOKEN', 'NOT_SET')[-10:]}")
-        print(f"🔧 Environment check - EMBEDDING_MODEL: {os.getenv('EMBEDDING_MODEL', 'NOT_SET')}")
-        print(f"🔧 Environment check - QWEN2_MODEL: {os.getenv('QWEN2_MODEL', 'NOT_SET')}")
-        print(f"🔧 Environment check - EMBEDDING_ENDPOINT: {os.getenv('EMBEDDING_ENDPOINT', 'NOT_SET')}")
-        
-        # Check for LlamaIndex API key
-        llamaindex_api_key = os.getenv("LLAMAINDEX_API_KEY")
-        
-        # Note: LlamaIndex hosted services packages don't exist yet
-        # Using HuggingFace models directly
-        if False:  # Disabled until packages are available
-            pass
-        else:
-            print("🤗 Using Hugging Face models")
-            
-            # Use custom embedding endpoint as requested
-            embedding_endpoint = os.getenv("EMBEDDING_ENDPOINT")
-            if embedding_endpoint:
-                print("🚀 Using simple custom HF embedding endpoint")
-                try:
-                    # Use a simple approach that works reliably with LlamaIndex
-                    from llama_index.core.embeddings import BaseEmbedding
-                    from simple_custom_embedding import get_embedding_from_hf_endpoint, get_embeddings_from_hf_endpoint
-                    
-                    class SimpleCustomEmbedding(BaseEmbedding):
-                        def __init__(self):
-                            super().__init__(
-                                model_name="custom_hf_endpoint",
-                                embed_batch_size=32
-                            )
-                        
-                        def _get_query_embedding(self, query: str):
-                            return get_embedding_from_hf_endpoint(query)
-                        
-                        def _get_text_embedding(self, text: str):
-                            return get_embedding_from_hf_endpoint(text)
-                        
-                        def _get_text_embeddings(self, texts: list):
-                            return get_embeddings_from_hf_endpoint(texts)
-                        
-                        async def _aget_query_embedding(self, query: str):
-                            return self._get_query_embedding(query)
-                        
-                        async def _aget_text_embedding(self, text: str):
-                            return self._get_text_embedding(text)
-                        
-                        async def _aget_text_embeddings(self, texts: list):
-                            return self._get_text_embeddings(texts)
-                    
-                    self.embed_model = SimpleCustomEmbedding()
-                    print("✅ Simple custom embedding endpoint initialized")
-                    print("⚠️ Note: Server-side padding strategy issue needs to be fixed")
-                    
-                except Exception as e:
-                    print(f"❌ Custom embedding error: {str(e)}")
-                    raise ValueError(f"Failed to initialize custom embedding: {str(e)}")
-            else:
-                print("❌ EMBEDDING_ENDPOINT not configured")
-                raise ValueError("Custom embedding endpoint required")
-            
-            # Initialize Qwen2 LLM using HuggingFace
-            self.qwen2_model = os.getenv("QWEN2_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-            hf_token = os.getenv("HF_TOKEN")
-            
-            if not hf_token:
-                raise ValueError("HF_TOKEN not found in environment")
-                
-            # For now, use a simple approach since HuggingFaceInferenceAPI is not available
-            # We'll create a minimal LLM wrapper or use requests directly
-            self.llm = None  # Will implement direct API calls for now
-            print("⚠️ Using direct HF API calls instead of LlamaIndex LLM wrapper")
-            
-            print(f"✅ Embedding model: Custom HF endpoint")
-            print(f"🤖 LLM model: {self.qwen2_model}")
-            print(f"🔑 Using HF token: ...{hf_token[-10:]}")
-        
+        """Initialize embedding models using AWS Bedrock Cohere"""
+        print("🤖 Initializing models with AWS Bedrock...")
+        print(f"🔧 AWS_REGION: {os.getenv('AWS_REGION', 'NOT_SET')}")
+        print(f"🔧 BEDROCK_MODEL_ID: {os.getenv('BEDROCK_MODEL_ID', 'NOT_SET')}")
+
+        if not BEDROCK_AVAILABLE or not cohere_embeddings:
+            raise ValueError("Bedrock Cohere embeddings not available. Check AWS credentials.")
+
+        print("🚀 Using AWS Bedrock Cohere embeddings (1024 dimensions)")
+
+        try:
+            # Create custom embedding wrapper for LlamaIndex
+            from llama_index.core.embeddings import BaseEmbedding
+
+            class BedrockCohereEmbedding(BaseEmbedding):
+                """LlamaIndex embedding wrapper for Bedrock Cohere"""
+                def __init__(self):
+                    super().__init__(
+                        model_name="bedrock_cohere_embed_english_v3",
+                        embed_batch_size=96  # Cohere max batch size
+                    )
+
+                def _get_query_embedding(self, query: str):
+                    return cohere_embeddings.get_query_embedding(query)
+
+                def _get_text_embedding(self, text: str):
+                    embeddings = cohere_embeddings.get_embeddings([text], input_type="search_document")
+                    return embeddings[0] if embeddings else [0.0] * 1024
+
+                def _get_text_embeddings(self, texts: list):
+                    return cohere_embeddings.get_embeddings(texts, input_type="search_document")
+
+                async def _aget_query_embedding(self, query: str):
+                    return self._get_query_embedding(query)
+
+                async def _aget_text_embedding(self, text: str):
+                    return self._get_text_embedding(text)
+
+                async def _aget_text_embeddings(self, texts: list):
+                    return self._get_text_embeddings(texts)
+
+            self.embed_model = BedrockCohereEmbedding()
+            print("✅ Bedrock Cohere embedding initialized")
+
+        except Exception as e:
+            print(f"❌ Bedrock Cohere embedding error: {str(e)}")
+            raise ValueError(f"Failed to initialize Bedrock Cohere embedding: {str(e)}")
+
+        # LLM is handled separately via bedrock_client.claude
+        self.llm = None
+        print("✅ Using Bedrock Claude for LLM operations")
+
         # Set global models
         Settings.embed_model = self.embed_model
-        # Settings.llm = self.llm  # Skip for now since we're using direct API calls
         Settings.chunk_size = int(os.getenv("LLAMAINDEX_CHUNK_SIZE", "1024"))
         Settings.chunk_overlap = int(os.getenv("LLAMAINDEX_CHUNK_OVERLAP", "20"))
-        
-        print(f"📏 Vector dimension: {os.getenv('VECTOR_DIM', '1024')}")
+
+        print(f"📏 Vector dimension: 1024 (Cohere embed-english-v3)")
         print(f"🔧 Global embedding model set to: {type(Settings.embed_model)}")
         print(f"🔧 Model name: {getattr(Settings.embed_model, 'model_name', 'unknown')}")
-        
-        # Test the embedding model to make sure it works
-        print("🧪 Testing custom embedding model...")
+
+        # Test the embedding model
+        print("🧪 Testing Bedrock Cohere embedding model...")
         try:
             test_embedding = self.embed_model._get_text_embedding("test")
-            print(f"✅ Custom embedding test successful, dimension: {len(test_embedding)}")
+            print(f"✅ Bedrock Cohere embedding test successful, dimension: {len(test_embedding)}")
         except Exception as e:
-            print(f"❌ Custom embedding test failed: {str(e)}")
+            print(f"❌ Bedrock Cohere embedding test failed: {str(e)}")
             raise
     
     def setup_vector_store(self):
@@ -148,11 +129,11 @@ class LlamaIndexProcessor:
                 port=5432,
                 user=db_url.split('://')[1].split(':')[0],     # Extract user
                 table_name="llamaindex_embeddings",
-                embed_dim=int(os.getenv("VECTOR_DIM", "2560")),  # Fixed dimension
+                embed_dim=int(os.getenv("VECTOR_DIM", "1024")),  # Cohere 1024 dimensions
                 schema_name="public"
             )
             print(f"✅ Vector store connection established")
-            print(f"📊 Using embed_dim: {os.getenv('VECTOR_DIM', '2560')}")
+            print(f"📊 Using embed_dim: {os.getenv('VECTOR_DIM', '1024')}")
             
         except Exception as e:
             print(f"❌ Vector store setup error: {str(e)}")
@@ -161,7 +142,7 @@ class LlamaIndexProcessor:
             self.vector_store = PGVectorStore(
                 connection_string=db_url,
                 table_name="llamaindex_embeddings",
-                embed_dim=int(os.getenv("VECTOR_DIM", "2560"))
+                embed_dim=int(os.getenv("VECTOR_DIM", "1024"))
             )
         
         print("✅ Vector store initialized")
@@ -378,54 +359,27 @@ class LlamaIndexProcessor:
         
         return query_engine
     
-    def query_qwen2(self, prompt: str) -> str:
+    def query_bedrock_claude(self, prompt: str) -> str:
         """
-        Query Qwen2 model using direct HuggingFace API
-        
+        Query Bedrock Claude model
+
         Args:
             prompt: Input prompt
-            
+
         Returns:
             Generated response
         """
         try:
-            print(f"🤖 Querying Qwen2 model via HF API...")
-            
-            hf_endpoint = os.getenv("HUGGING_FACE_ENDPOINT")
-            hf_token = os.getenv("HF_TOKEN")
-            
-            if not hf_endpoint or not hf_token:
-                return "Error: HF endpoint or token not configured"
-            
-            headers = {
-                "Authorization": f"Bearer {hf_token}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_new_tokens": 512,
-                    "temperature": 0.7,
-                    "top_p": 0.95,
-                    "do_sample": True
-                }
-            }
-            
-            response = requests.post(hf_endpoint, headers=headers, json=payload)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0:
-                    return result[0].get("generated_text", "No response generated").strip()
-                else:
-                    return str(result)
-            else:
-                print(f"❌ HF API error: {response.status_code} - {response.text}")
-                return f"Error: HF API returned {response.status_code}"
-                
+            print(f"🤖 Querying Bedrock Claude...")
+
+            if not BEDROCK_AVAILABLE or not claude:
+                return "Error: Bedrock Claude not available"
+
+            response = claude.generate(prompt, max_tokens=2048, temperature=0.7)
+            return response
+
         except Exception as e:
-            print(f"❌ Qwen2 query error: {str(e)}")
+            print(f"❌ Bedrock Claude query error: {str(e)}")
             return f"Error: {str(e)}"
     
     def generate_answer(self, query: str, org_id: str, file_ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -476,9 +430,9 @@ Question: {query}
 
 Answer:"""
             
-            # Step 4: Generate answer using Qwen2
-            print(f"🤖 Generating answer with Qwen2...")
-            answer = self.query_qwen2(prompt)
+            # Step 4: Generate answer using Bedrock Claude
+            print(f"🤖 Generating answer with Bedrock Claude...")
+            answer = self.query_bedrock_claude(prompt)
             
             return {
                 "answer": answer,

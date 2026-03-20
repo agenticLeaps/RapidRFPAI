@@ -1,6 +1,6 @@
 """
 Document Shredding Service for V3 Project Creation
-Extracts metadata and submission requirements from RFP documents using Gemini
+Extracts metadata and submission requirements from RFP documents using AWS Bedrock Claude
 """
 
 import os
@@ -10,7 +10,14 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from google.cloud import storage
 from google.oauth2 import service_account
-from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+
+# Import Bedrock client for Claude AI
+try:
+    from bedrock_client import claude, BEDROCK_AVAILABLE
+except ImportError:
+    BEDROCK_AVAILABLE = False
+    claude = None
+    print("⚠️ Bedrock client not available for document shredding")
 
 # For docx conversion
 try:
@@ -137,9 +144,9 @@ def download_file_from_gcs(storage_url: str, temp_dir: str) -> tuple[str, str]:
     raise ValueError(f"Invalid storage URL: {storage_url}. Expected s3:// or gs://")
 
 
-def prepare_gemini_prompt() -> str:
+def prepare_shredding_prompt() -> str:
     """
-    Prepare the prompt for Gemini document analysis
+    Prepare the prompt for document analysis
 
     Returns:
         Formatted prompt string
@@ -518,153 +525,89 @@ def extract_partial_json(json_text: str) -> Dict[str, Any]:
     return result
 
 
-def call_gemini_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, Any]:
+def call_bedrock_for_shredding(files_data: List[tuple[bytes, str]]) -> Dict[str, Any]:
     """
-    Call Gemini to extract metadata and submission requirements using multimodal capabilities
+    Call AWS Bedrock Claude to extract metadata and submission requirements using multimodal capabilities
 
     Args:
         files_data: List of tuples (file_bytes, filename)
 
     Returns:
-        Parsed JSON response from Gemini
+        Parsed JSON response from Claude
     """
+    if not BEDROCK_AVAILABLE or not claude:
+        raise RuntimeError("Bedrock client not available. Check AWS credentials.")
+
     try:
-        # Initialize Gemini model
-        # Using gemini-2.5-flash-lite - better rate limits
-        model = GenerativeModel("gemini-2.5-flash-lite")
+        # Prepare the prompt
+        prompt = prepare_shredding_prompt()
 
-        # Prepare parts for multimodal input
-        parts = []
+        # Prepare documents for Claude's call_claude_with_documents method
+        documents = []
 
-        # Add the prompt as the first part
-        prompt = prepare_gemini_prompt()
-        parts.append(Part.from_text(prompt))
-
-        # Define MIME type mapping for Gemini-supported formats
-        # Note: Gemini does NOT support .doc/.docx directly - they must be converted to text
-        mime_mapping = {
-            "pdf": "application/pdf",
-            "txt": "text/plain",
-            "csv": "text/csv",
-            "json": "application/json",
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "gif": "image/gif",
-            "webp": "image/webp"
-        }
-
-        # File extensions that need text extraction (not supported by Gemini multimodal)
-        text_extraction_extensions = {"doc", "docx"}
-
-        # Add each file as a multimodal part
         for file_bytes, filename in files_data:
             file_ext = os.path.splitext(filename)[1].lower().lstrip('.')
 
-            # Check if this file type needs text extraction
-            if file_ext in text_extraction_extensions:
-                # Convert .docx to text
-                if file_ext == "docx":
-                    try:
-                        extracted_text = extract_text_from_docx(file_bytes)
-                        # Add as text part with filename header
-                        parts.append(Part.from_text(f"\n\n--- Document: {filename} ---\n\n{extracted_text}"))
-                        print(f"✅ Converted {filename} to text ({len(extracted_text)} chars)")
-                        continue
-                    except Exception as e:
-                        print(f"⚠️ Could not extract text from {filename}: {e}")
-                        # Fall through to try binary upload (will likely fail)
-
-                elif file_ext == "doc":
-                    print(f"⚠️ .doc format not supported. Please convert {filename} to .docx or .pdf")
-                    # Add a placeholder message
-                    parts.append(Part.from_text(f"\n\n--- Document: {filename} (Unable to process .doc format - please convert to .docx or .pdf) ---\n\n"))
-                    continue
-
-            # For supported formats, use multimodal upload
-            mime_type = mime_mapping.get(file_ext, "application/octet-stream")
-
-            # Skip unsupported MIME types
-            if mime_type == "application/octet-stream":
-                print(f"⚠️ Unsupported file type: {filename} ({file_ext}). Skipping.")
+            # Handle .doc files (not supported)
+            if file_ext == "doc":
+                print(f"⚠️ .doc format not supported. Please convert {filename} to .docx or .pdf")
                 continue
 
-            # Add file part
-            file_part = Part.from_data(data=file_bytes, mime_type=mime_type)
-            parts.append(file_part)
+            documents.append((file_bytes, filename))
+            print(f"✅ Added {filename} for document processing ({len(file_bytes)} bytes)")
 
-            # Add a text separator with filename
-            parts.append(Part.from_text(f"\n\n--- End of document: {filename} ---\n\n"))
+        if not documents:
+            raise Exception("No processable documents found")
 
-            print(f"✅ Added {filename} to multimodal request ({mime_type}, {len(file_bytes)} bytes)")
+        print(f"🤖 Sending request to Bedrock Claude for document shredding ({len(documents)} files)...")
 
-        # Safety settings to prevent blocking
-        safety_settings = [
-            SafetySetting(
-                category="HARM_CATEGORY_HATE_SPEECH",
-                threshold="BLOCK_NONE"
-            ),
-            SafetySetting(
-                category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold="BLOCK_NONE"
-            ),
-            SafetySetting(
-                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold="BLOCK_NONE"
-            ),
-            SafetySetting(
-                category="HARM_CATEGORY_HARASSMENT",
-                threshold="BLOCK_NONE"
-            ),
-        ]
-
-        # Generation config for JSON output
-        # gemini-2.5-flash-lite max is 65535 (exclusive)
-        generation_config = {
-            "temperature": 0.2,
-            "max_output_tokens": 32768,  # Higher limit for complex RFPs
-            "top_p": 0.8,
-            "response_mime_type": "application/json",  # Ensures valid JSON output
-        }
-
-        print(f"🤖 Sending request to Gemini for document shredding ({len(files_data)} files)...")
-
-        # Call Gemini with multimodal parts
-        response = model.generate_content(
-            parts,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=False
+        # Call Claude with documents using Bedrock
+        response = claude.call_claude_with_documents(
+            prompt=prompt,
+            documents=documents,
+            max_tokens=32768,
+            temperature=0.2,
+            response_format="json"
         )
 
-        print(f"✅ Received response from Gemini")
+        print(f"✅ Received response from Bedrock Claude")
 
-        # Parse JSON response
-        response_text = response.text.strip()
-        print(f"📝 Raw response length: {len(response_text)} characters")
+        # Response is already parsed as JSON by call_claude_with_documents
+        if isinstance(response, dict):
+            # Check if there was an error parsing
+            if 'error' in response and response['error'] == 'Failed to parse response':
+                print(f"⚠️ JSON parse error in response. Attempting to repair...")
+                raw_text = response.get('raw', '')
+                result = repair_truncated_json(raw_text)
+            else:
+                result = response
+        else:
+            # If response is a string, try to parse it
+            response_text = str(response).strip()
+            print(f"📝 Raw response length: {len(response_text)} characters")
 
-        # Clean up response if needed (remove markdown code blocks)
-        if response_text.startswith('```json'):
-            response_text = response_text[7:]
-        if response_text.startswith('```'):
-            response_text = response_text[3:]
-        if response_text.endswith('```'):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
+            # Clean up response if needed (remove markdown code blocks)
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+            response_text = response_text.strip()
 
-        # Try to parse JSON, with recovery for truncated responses
-        try:
-            result = json.loads(response_text)
-        except json.JSONDecodeError as json_err:
-            print(f"⚠️ JSON parse error: {json_err}. Attempting to repair truncated JSON...")
-            result = repair_truncated_json(response_text)
+            # Try to parse JSON
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError as json_err:
+                print(f"⚠️ JSON parse error: {json_err}. Attempting to repair truncated JSON...")
+                result = repair_truncated_json(response_text)
 
         print(f"✅ Successfully parsed JSON response")
 
         return result
 
     except Exception as e:
-        print(f"❌ Error calling Gemini: {e}")
+        print(f"❌ Error calling Bedrock Claude: {e}")
         import traceback
         traceback.print_exc()
         raise
@@ -715,8 +658,8 @@ def shred_documents(files: List[Dict[str, str]], org_id: str) -> Dict[str, Any]:
         if not files_data:
             raise Exception("No files could be processed")
 
-        # Step 2: Call Gemini with all files using multimodal input
-        result = call_gemini_for_shredding(files_data)
+        # Step 2: Call Bedrock Claude with all files using multimodal input
+        result = call_bedrock_for_shredding(files_data)
 
         # Step 3: Validate and return result
         if not result.get('project_metadata'):

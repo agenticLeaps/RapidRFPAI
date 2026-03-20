@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from threading import Thread, Lock
 import asyncio
 from waitress import serve
-from openai import OpenAI
 
 # In-memory cache for storing page counts during NodeRAG processing
 # Format: {file_id: {"page_count": int, "chunks_count": int, "timestamp": float}}
@@ -61,10 +60,17 @@ except ImportError as e:
 
 # Global variables
 FIREBASE_AVAILABLE = False
-OPENAI_AVAILABLE = False
-VERTEX_AVAILABLE = False
+BEDROCK_AVAILABLE = False
 db = None
-openai_client = None
+
+# Import Bedrock client for Claude AI
+try:
+    from bedrock_client import claude, cohere_embeddings, BEDROCK_AVAILABLE as _BEDROCK_AVAIL
+    BEDROCK_AVAILABLE = _BEDROCK_AVAIL
+    if BEDROCK_AVAILABLE:
+        print("✅ AWS Bedrock client initialized (Claude + Cohere embeddings)")
+except ImportError as e:
+    print(f"⚠️ Bedrock client not available: {e}")
 
 # Server startup time for uptime tracking
 start_time = time.time()
@@ -169,130 +175,39 @@ def check_file_processing_dependencies():
 # ================================
 # RERANKING FUNCTIONALITY
 # ================================
-
-# Global variable to cache the cross-encoder model
-_cross_encoder_model = None
-
-def get_cross_encoder_model():
-    """Lazy load the cross-encoder model for reranking"""
-    global _cross_encoder_model
-    if _cross_encoder_model is None:
-        try:
-            from sentence_transformers import CrossEncoder
-            print("🔄 Loading cross-encoder model for reranking...")
-            
-            # Try to load the model with timeout and retry logic
-            try:
-                # Check for HF token to avoid rate limiting
-                import os
-                hf_token = os.getenv('HF_TOKEN') or os.getenv('HUGGINGFACE_TOKEN')
-                if hf_token:
-                    print("🔑 Using Hugging Face token to avoid rate limits")
-                else:
-                    print("⚠️ No HF_TOKEN found - may hit rate limits")
-                
-                # Try to load model with device handling
-                try:
-                    import torch
-                    device = "cpu"  # Force CPU to avoid tensor issues
-                    print(f"🔧 Loading cross-encoder on device: {device}")
-                    _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2', device=device)
-                except Exception as device_error:
-                    # Fallback without explicit device
-                    print(f"🔧 Device-specific loading failed: {device_error}")
-                    print("🔧 Loading cross-encoder with auto device detection")
-                    try:
-                        _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2')
-                    except Exception as fallback_error:
-                        print(f"🔧 Auto device loading failed: {fallback_error}")
-                        # Try with trust_remote_code for newer models
-                        _cross_encoder_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-2-v2', trust_remote_code=True)
-                
-                print("✅ Cross-encoder model loaded successfully")
-            except Exception as download_error:
-                error_str = str(download_error)
-                if "429" in error_str or "rate limit" in error_str.lower():
-                    print("⚠️ Hugging Face rate limit hit - reranking temporarily disabled")
-                    print("💡 Fallback: Using hybrid search + similarity ranking instead")
-                elif "connection" in error_str.lower() or "timeout" in error_str.lower():
-                    print("⚠️ Network connection issue - reranking temporarily disabled")  
-                    print("💡 Fallback: Using hybrid search + similarity ranking instead")
-                else:
-                    print(f"⚠️ Error loading cross-encoder model: {error_str}")
-                return None
-                
-        except ImportError:
-            print("⚠️ sentence-transformers not available - reranking disabled")
-            return None
-        except Exception as e:
-            print(f"⚠️ Error initializing cross-encoder: {str(e)}")
-            return None
-    return _cross_encoder_model
+# Note: Cross-encoder reranking removed - using similarity-based ranking
+# HuggingFace/sentence-transformers dependency removed in Bedrock migration
 
 def rerank_documents(query, documents, top_k=5):
     """
-    Rerank documents using cross-encoder model
-    
+    Rerank documents using similarity-based ranking.
+
+    Note: Cross-encoder reranking was removed during Bedrock migration.
+    Using hybrid search + similarity ranking as primary method.
+
     Args:
         query (str): The search query
         documents (list): List of document dictionaries with 'content' and 'score' keys
         top_k (int): Number of top documents to return after reranking
-    
+
     Returns:
-        list: Reranked documents with updated scores
+        list: Ranked documents sorted by similarity score
     """
     try:
-        model = get_cross_encoder_model()
-        if model is None:
-            print("⚠️ Cross-encoder model not available - falling back to similarity ranking")
-            return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-        
         if not documents:
             return []
-        
-        print(f"🔄 Reranking {len(documents)} documents with cross-encoder...")
-        
-        # Prepare query-document pairs for cross-encoder
-        pairs = []
-        for doc in documents:
-            content = doc.get("content", "")
-            # Truncate content to avoid token limits (cross-encoder typically handles ~512 tokens)
-            truncated_content = content[:2000] if len(content) > 2000 else content
-            pairs.append([query, truncated_content])
-        
-        # Get cross-encoder scores with error handling
-        try:
-            cross_encoder_scores = model.predict(pairs)
-        except Exception as predict_error:
-            error_str = str(predict_error)
-            if "meta tensor" in error_str or "torch.nn.Module.to_empty" in error_str:
-                print("⚠️ PyTorch tensor loading issue - falling back to similarity ranking")
-            elif "cuda" in error_str.lower() or "device" in error_str.lower():
-                print("⚠️ Device/CUDA issue - falling back to similarity ranking")
-            else:
-                print(f"⚠️ Cross-encoder prediction error: {error_str}")
-            # Return similarity-ranked results as fallback
-            return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-        
-        # Update documents with new scores
-        reranked_docs = []
-        for i, doc in enumerate(documents):
-            doc_copy = doc.copy()
-            doc_copy["cross_encoder_score"] = float(cross_encoder_scores[i])
-            doc_copy["original_score"] = doc.get("score", 0)
-            reranked_docs.append(doc_copy)
-        
-        # Sort by cross-encoder score and return top_k
-        reranked_docs.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
-        top_reranked = reranked_docs[:top_k]
-        
-        print(f"✅ Reranking complete - returned top {len(top_reranked)} documents")
-        return top_reranked
-        
+
+        print(f"🔄 Ranking {len(documents)} documents by similarity score...")
+
+        # Sort by similarity score and return top_k
+        ranked_docs = sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+
+        print(f"✅ Ranking complete - returned top {len(ranked_docs)} documents")
+        return ranked_docs
+
     except Exception as e:
-        print(f"❌ Error during reranking: {str(e)}")
-        print("🔄 Falling back to similarity-based ranking...")
-        return sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+        print(f"❌ Error during ranking: {str(e)}")
+        return documents[:top_k] if documents else []
 
 # ================================
 # HYBRID SEARCH (DENSE + SPARSE)
@@ -608,14 +523,12 @@ def expand_query(original_query, context_type="general", max_variations=3):
         list: List of expanded queries including the original
     """
     try:
-        if not VERTEX_AVAILABLE:
-            print("⚠️ Vertex AI not available - using original query only")
+        if not BEDROCK_AVAILABLE:
+            print("⚠️ Bedrock AI not available - using original query only")
             return [original_query]
-        
-        from vertexai.generative_models import GenerativeModel, Part
-        
+
         print(f"🔄 Expanding query: '{original_query}' (context: {context_type})")
-        
+
         # Context-specific expansion prompts
         if context_type == "rfp":
             expansion_prompt = f"""
@@ -673,18 +586,16 @@ Generate {max_variations} related search queries that would find the same or sim
 
 Return only the queries, one per line, without numbering or explanations.
 """
-        
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        response = model.generate_content(
-            [Part.from_text(expansion_prompt)],
-            generation_config={
-                "max_output_tokens": 500,
-                "temperature": 0.7,  # Some creativity for variations
-                "top_p": 0.9,
-            }
+
+        # Use Bedrock Claude instead of Gemini
+        response = claude.call_claude(
+            prompt=expansion_prompt,
+            max_tokens=500,
+            temperature=0.7,
+            response_format="text"
         )
-        
-        expanded_text = response.text.strip()
+
+        expanded_text = response.get("text", "").strip()
         
         # Parse the response into separate queries
         expanded_queries = []
@@ -1408,9 +1319,9 @@ def is_ai_error_response(text):
     return False
 
 def extract_text_with_ai_direct(file_path, filename):
-    """Extract text content directly from any file using Vertex AI multimodal capabilities"""
-    if not VERTEX_AVAILABLE:
-        print("❌ Vertex AI not available, falling back to traditional extraction")
+    """Extract text content directly from any file using AWS Bedrock Claude multimodal capabilities"""
+    if not BEDROCK_AVAILABLE:
+        print("❌ Bedrock AI not available, falling back to traditional extraction")
         return None
         
     try:
@@ -1460,11 +1371,8 @@ Please provide a comprehensive text extraction of the entire document content.
 Return the extracted content as plain text without any formatting or special characters.
 """
 
-        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        
-        # Prepare the content
-        parts = [Part.from_text(prompt)]
+        # Use Bedrock Claude for text extraction
+        # Prepare content for Bedrock Claude
         
         # MIME type mapping
         mime_mapping = {
@@ -1587,131 +1495,69 @@ Return the extracted content as plain text without any formatting or special cha
             "dockerfile": "text/plain",
         }
         
-        # Files that Gemini can handle directly
-        gemini_supported_files = [
-            # Documents
+        # Files that Bedrock Claude can handle directly (via call_claude_with_documents)
+        bedrock_supported_files = [
+            # Documents (PDF, DOCX supported via text extraction in bedrock_client)
             "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
-            
-            # Images  
-            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
-            
+            "docx",
+
+            # Images (Claude supports images via base64)
+            "png", "jpg", "jpeg", "gif", "webp",
+
             # Code files (text-based)
-            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
+            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs",
             "swift", "kt", "scala", "sql", "sh", "ps1",
-            
+
             # Configuration files
             "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
-            
-            # Audio (Gemini 2.0 supports audio)
-            "mp3", "wav", "m4a", "aac", "ogg", "flac",
-            
-            # Video (Gemini 2.0 supports video)
-            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
         ]
-        
-        if file_ext in gemini_supported_files:
-            try:
-                # Read file as bytes for direct upload
-                with open(file_path, "rb") as f:
-                    file_data = f.read()
-                
-                mime_type = mime_mapping.get(file_ext, "application/octet-stream")
-                
-                # Check file size (Gemini has limits)
-                max_size = 20 * 1024 * 1024  # 20MB limit for safety
-                if len(file_data) > max_size:
-                    print(f"⚠️ File too large for AI extraction ({len(file_data)} bytes), falling back")
-                    return None
-                
-                # Add file part directly
-                file_part = Part.from_data(data=file_data, mime_type=mime_type)
-                parts.append(file_part)
-                
-                print(f"✅ Using AI multimodal extraction for {filename} ({mime_type}, {len(file_data)} bytes)")
-                
-            except Exception as e:
-                print(f"⚠️ Direct AI upload failed for {filename}: {e}")
-                return None
-        else:
-            # For unsupported file types, try to extract text using appropriate method
-            try:
-                print(f"📄 Attempting text extraction for unsupported type: {file_ext}")
-                
-                # Use proper extraction method based on file type
-                if file_ext == "docx":
-                    content = extract_docx_text(file_path)
-                elif file_ext in ["xlsx", "xls"]:
-                    content = extract_excel_text(file_path, file_ext)
-                elif file_ext == "csv":
-                    content = extract_csv_text(file_path)
-                else:
-                    # For truly unsupported types, try encoding detection
-                    content = extract_text_with_encoding_detection(file_path)
-                
-                # Check if extraction returned an error
-                if content and content.startswith("ERROR:"):
-                    print(f"❌ Extraction failed: {content}")
-                    return None
-                
-                if content and len(content.strip()) > 0:
-                    # Limit content length for AI processing
-                    if len(content) > 50000:  # 50k char limit
-                        content = content[:50000] + "...[truncated]"
-                    parts.append(Part.from_text(f"\nDocument Content to extract from:\n{content}"))
-                else:
-                    print(f"❌ No text content found in {filename}")
-                    return None
-            except Exception as e:
-                print(f"❌ Failed to extract text: {e}")
-                return None
-        
-        # Generate response with AI
-        print(f"🤖 Sending to AI for text extraction...")
-        
+
+        # Read file as bytes
         try:
-            response = model.generate_content(
-                parts,
-                generation_config={
-                    "max_output_tokens": 8192,
-                    "temperature": 0.1,  # Low temperature for accurate extraction
-                    "top_p": 0.95,
-                },
-                safety_settings=[
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                        threshold=SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                    ),
-                ]
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            # Check file size (Bedrock has limits)
+            max_size = 20 * 1024 * 1024  # 20MB limit for safety
+            if len(file_data) > max_size:
+                print(f"⚠️ File too large for AI extraction ({len(file_data)} bytes), falling back")
+                return None
+
+            print(f"✅ Using Bedrock Claude for extraction: {filename} ({len(file_data)} bytes)")
+
+        except Exception as e:
+            print(f"⚠️ Failed to read file for AI upload: {filename}: {e}")
+            return None
+
+        # Generate response with Bedrock Claude
+        print(f"🤖 Sending to Bedrock Claude for text extraction...")
+
+        try:
+            # Use call_claude_with_documents for multimodal extraction
+            response = claude.call_claude_with_documents(
+                prompt=prompt,
+                documents=[(file_data, filename)],
+                max_tokens=8192,
+                temperature=0.1,  # Low temperature for accurate extraction
+                response_format="text"
             )
-            
-            if response and response.text:
-                extracted_text = response.text.strip()
-                
+
+            if response and response.get("text"):
+                extracted_text = response["text"].strip()
+
                 # Check if the AI response is an error message
                 if is_ai_error_response(extracted_text):
                     print(f"❌ AI returned error response for {filename}: {extracted_text[:100]}...")
                     return None
-                
-                print(f"✅ AI extracted {len(extracted_text)} characters from {filename}")
+
+                print(f"✅ Bedrock Claude extracted {len(extracted_text)} characters from {filename}")
                 return extracted_text
             else:
-                print(f"❌ Empty response from AI for {filename}")
+                print(f"❌ Empty response from Bedrock Claude for {filename}")
                 return None
-                
+
         except Exception as e:
-            print(f"❌ AI generation failed for {filename}: {str(e)}")
+            print(f"❌ Bedrock Claude generation failed for {filename}: {str(e)}")
             return None
             
     except Exception as e:
@@ -1808,70 +1654,15 @@ try:
     FIREBASE_AVAILABLE = True
     print("✅ Successfully initialized Firebase")
         
-    try:
-        from vertexai import init as vertex_init
-        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        
-        # Allow separate project IDs for different services
-        project_id = os.environ.get("VERTEX_AI_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", "buildnblog-450618"))
-        
-        # For Vertex AI, always use fire.json file if it exists, otherwise use env credentials
-        if os.path.exists("fire.json"):
-            # Use fire.json for Vertex AI (buildnblog-450618 project)
-            vertex_credentials = service_account.Credentials.from_service_account_file("fire.json")
-            print("✅ Using fire.json for Vertex AI")
-        elif cred_path.startswith("{"):
-            # Fallback to environment JSON
-            vertex_credentials = service_account.Credentials.from_service_account_info(cred_dict)
-            print("✅ Using environment credentials for Vertex AI")
-        else:
-            # Fallback to file path
-            vertex_credentials = service_account.Credentials.from_service_account_file(cred_path)
-            print(f"✅ Using {cred_path} for Vertex AI")
-            
-        aiplatform.init(project=project_id, location="us-central1", credentials=vertex_credentials)
-        vertex_init(project=project_id, location="us-central1")
-        VERTEX_AVAILABLE = True
-        print("✅ Successfully initialized Vertex AI")
-    except Exception as e:
-        print(f"⚠️ Vertex AI initialization failed: {str(e)}")
+    # Note: Bedrock is initialized via bedrock_client import at the top of the file
+    # BEDROCK_AVAILABLE flag is set automatically when bedrock_client is imported
+    if BEDROCK_AVAILABLE:
+        print("✅ AWS Bedrock (Claude + Cohere) is available for AI operations")
 
 except Exception as e:
     print(f"⚠️ Firebase initialization failed: {str(e)}")
 
-# Initialize OpenAI client
-try:
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
-        print("⚠️ OPENAI_API_KEY environment variable not found. OpenAI embeddings will be disabled.")
-    else:
-        openai_client = OpenAI(api_key=openai_api_key)
-        OPENAI_AVAILABLE = True
-        print("✅ Successfully initialized OpenAI client")
-except Exception as e:
-    print(f"⚠️ OpenAI initialization failed: {str(e)}")
-
-def get_openai_client():
-    """Get the OpenAI client, initializing if needed"""
-    global openai_client, OPENAI_AVAILABLE
-    
-    if not OPENAI_AVAILABLE:
-        raise ValueError("OpenAI functionality is not available")
-        
-    if openai_client is None:
-        try:
-            openai_api_key = os.environ.get("OPENAI_API_KEY")
-            if not openai_api_key:
-                raise ValueError("OPENAI_API_KEY environment variable not found")
-            
-            openai_client = OpenAI(api_key=openai_api_key)
-            print("✅ OpenAI client initialized successfully")
-        except Exception as e:
-            print(f"❌ Error initializing OpenAI client: {str(e)}")
-            OPENAI_AVAILABLE = False
-            raise
-            
-    return openai_client
+# Embeddings now handled by Bedrock Cohere (imported from bedrock_client)
 
 # ================================
 # UTILITY FUNCTIONS
@@ -1981,21 +1772,22 @@ def update_backend_embedding_status(file_id, org_id, is_from_embedding):
     reraise=True
 )
 def embed_chunks(chunks, upload_id=None, org_id=None, filename=None):
-    """Embed chunks with OpenAI API with retry logic - OPTIMIZED with caching"""
+    """Embed chunks with Bedrock Cohere API with retry logic - OPTIMIZED with caching"""
+    if not BEDROCK_AVAILABLE or not cohere_embeddings:
+        raise RuntimeError("Bedrock Cohere embeddings not available. Check AWS credentials.")
+
     try:
-        client = get_openai_client()
-        
         all_embeddings = []
         total = len(chunks)
         cache_hits = 0
-        
+
         # OPTIMIZATION: Check cache for duplicate content
-        print(f"🚀 Processing {total} chunks with caching optimization")
-        
+        print(f"🚀 Processing {total} chunks with caching optimization (Cohere 1024-dim)")
+
         # First pass: separate cached vs new chunks
         chunks_to_embed = []
         chunk_indices = []
-        
+
         with cache_lock:
             for i, chunk in enumerate(chunks):
                 chunk_hash = hash(chunk.strip())
@@ -2005,32 +1797,32 @@ def embed_chunks(chunks, upload_id=None, org_id=None, filename=None):
                 else:
                     chunks_to_embed.append(chunk)
                     chunk_indices.append(i)
-        
+
         if cache_hits > 0:
             print(f"🎯 Cache hits: {cache_hits}/{total} chunks ({cache_hits/total*100:.1f}%)")
-        
+
         # Only embed chunks not in cache
         if chunks_to_embed:
-            # OPTIMIZATION: Increased batch size from 20 to 100 for 5x speedup
-            batch_size = 100
+            # Cohere max batch size is 96
+            batch_size = 96
             new_embeddings = []
-            
+
             print(f"🚀 Embedding {len(chunks_to_embed)} new chunks in batches of {batch_size}")
-            
+
             for i in range(0, len(chunks_to_embed), batch_size):
                 batch = chunks_to_embed[i:i + batch_size]
                 batch_end = min(i + batch_size, len(chunks_to_embed))
-                
+
                 try:
-                    response = client.embeddings.create(
-                        model="text-embedding-3-small",
-                        input=batch
+                    # Use Cohere embeddings via Bedrock
+                    batch_embeddings = cohere_embeddings.get_embeddings(
+                        texts=batch,
+                        input_type="search_document"
                     )
-                    
-                    for j, item in enumerate(response.data):
-                        embedding = item.embedding
+
+                    for j, embedding in enumerate(batch_embeddings):
                         new_embeddings.append(embedding)
-                        
+
                         # Cache the embedding
                         chunk_hash = hash(batch[j].strip())
                         with cache_lock:
@@ -2040,37 +1832,34 @@ def embed_chunks(chunks, upload_id=None, org_id=None, filename=None):
                                 keys_to_remove = list(embedding_cache.keys())[:CACHE_MAX_SIZE//10]
                                 for key in keys_to_remove:
                                     del embedding_cache[key]
-                            
+
                             embedding_cache[chunk_hash] = embedding
-                    
+
                     if upload_id:
                         progress = min(75 + ((batch_end) / len(chunks_to_embed)) * 20, 95)
-                        update_upload_progress(upload_id, "Processing", progress, 
+                        update_upload_progress(upload_id, "Processing", progress,
                                               f"Generating embeddings ({batch_end}/{len(chunks_to_embed)} new)")
-                    
+
                     print(f"✓ Processed batch {i//batch_size + 1}: {batch_end}/{len(chunks_to_embed)} new chunks")
-                    
-                    # OPTIMIZATION: Removed fixed 0.5s delay - only sleep on rate limit errors
-                    
+
                 except Exception as batch_error:
                     # If we hit rate limits, add a small delay and retry
-                    if "rate" in str(batch_error).lower():
+                    if "throttl" in str(batch_error).lower() or "rate" in str(batch_error).lower():
                         print(f"⚠️ Rate limit hit, waiting 2s before retry...")
                         time.sleep(2)
                         # Retry the batch
-                        response = client.embeddings.create(
-                            model="text-embedding-3-small",
-                            input=batch
+                        batch_embeddings = cohere_embeddings.get_embeddings(
+                            texts=batch,
+                            input_type="search_document"
                         )
-                        for j, item in enumerate(response.data):
-                            embedding = item.embedding
+                        for embedding in batch_embeddings:
                             new_embeddings.append(embedding)
                     else:
                         raise batch_error
-            
+
             # Merge cached and new embeddings in correct order
             result_embeddings = [None] * total
-            
+
             # Place cached embeddings
             cached_idx = 0
             new_idx = 0
@@ -2081,14 +1870,14 @@ def embed_chunks(chunks, upload_id=None, org_id=None, filename=None):
                 else:
                     result_embeddings[i] = all_embeddings[cached_idx]
                     cached_idx += 1
-            
+
             all_embeddings = result_embeddings
-        
+
         cache_efficiency = f" ({cache_hits}/{total} cached)" if cache_hits > 0 else ""
-        print(f"✅ Generated {len(all_embeddings)} embeddings{cache_efficiency} (5x faster with optimizations)")
+        print(f"✅ Generated {len(all_embeddings)} Cohere embeddings (1024-dim){cache_efficiency}")
         return all_embeddings
     except Exception as e:
-        print(f"❌ Error generating embeddings: {str(e)}")
+        print(f"❌ Error generating Cohere embeddings: {str(e)}")
         raise
 
 @retry(
@@ -2098,18 +1887,15 @@ def embed_chunks(chunks, upload_id=None, org_id=None, filename=None):
     reraise=True
 )
 def embed_query(query):
-    """Embed a single query with OpenAI API with retry logic"""
+    """Embed a single query with Bedrock Cohere API with retry logic"""
+    if not BEDROCK_AVAILABLE or not cohere_embeddings:
+        raise RuntimeError("Bedrock Cohere embeddings not available. Check AWS credentials.")
+
     try:
-        client = get_openai_client()
-        
-        response = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=[query]
-        )
-        
-        return response.data[0].embedding
+        # Use Cohere query embedding with search_query input type for better retrieval
+        return cohere_embeddings.get_query_embedding(query)
     except Exception as e:
-        print(f"❌ Error embedding query: {str(e)}")
+        print(f"❌ Error embedding query with Cohere: {str(e)}")
         raise
 
 def parse_and_chunk(file_path, file_ext, chunk_size=50, max_chunks=1000):
@@ -2322,13 +2108,13 @@ def get_knowledge_base_context(query, org_id, project_id, knowledge_base_option=
         return "No specific context available."
 
 def generate_answer_with_gcp(query, context_chunks, conversation_history=""):
-    """Generate answer using Google's Vertex AI"""
-    if not VERTEX_AVAILABLE:
+    """Generate answer using AWS Bedrock Claude"""
+    if not BEDROCK_AVAILABLE:
         return "Sorry, the AI generation service is currently unavailable."
-        
+
     try:
         context_text = "\n\n".join(context_chunks)
-        
+
         prompt = f"""
 You are an intelligent assistant tasked with generating an accurate and comprehensive answer using only the information provided below.
 Your response must rely solely on the conversation history and the retrieved context, without adding external knowledge or assumptions.
@@ -2343,45 +2129,23 @@ Question:
 {query}
 """
 
-        model = GenerativeModel("gemini-2.5-flash-lite")
-
-        responses = model.generate_content(
-            [Part.from_text(prompt)],
-            generation_config={
-                "max_output_tokens": 8192,
-                "temperature": 1,
-                "top_p": 0.95,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+        # Use Bedrock Claude instead of Gemini
+        response = claude.call_claude(
+            prompt=prompt,
+            max_tokens=8192,
+            temperature=0.7,
+            response_format="text"
         )
 
-        return responses.text.strip()
+        return response.get("text", "").strip()
     except Exception as e:
         print(f"❌ Error generating answer: {str(e)}")
         return f"Error generating answer: {str(e)}"
 
 def extract_questions_with_ai_direct(file_path, filename):
-    """Extract questions directly from file using Vertex AI multimodal capabilities"""
-    if not VERTEX_AVAILABLE:
-        print("❌ Vertex AI not available")
+    """Extract questions directly from file using AWS Bedrock Claude multimodal capabilities"""
+    if not BEDROCK_AVAILABLE:
+        print("❌ Bedrock AI not available")
         return []
         
     try:
@@ -2545,135 +2309,37 @@ Format your response as a valid JSON object with sections and questions, like th
             # Combine API prompt + hardcoded JSON format
             prompt = f"{api_prompt}\n{json_format}"
 
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        
-        # Prepare the content based on file type
-        parts = [Part.from_text(prompt)]
-        
-        # Define MIME type mapping with proper Excel support
-        mime_mapping = {
-            "pdf": "application/pdf",
-            "txt": "text/plain", 
-            "csv": "text/csv",
-            "json": "application/json",
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg", 
-            "gif": "image/gif",
-            "webp": "image/webp",
-        }
-        
-        # Files that Gemini can handle directly (Excel and Word files are NOT included)
-        gemini_supported_files = [
-            # Documents
-            "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
-            
-            # Images  
-            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
-            
-            # Code files (text-based)
-            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
-            "swift", "kt", "scala", "sql", "sh", "ps1",
-            
-            # Configuration files
-            "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
-            
-            # Audio (Gemini 2.0 supports audio)
-            "mp3", "wav", "m4a", "aac", "ogg", "flac",
-            
-            # Video (Gemini 2.0 supports video)
-            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
-        ]
-        
-        if file_ext in gemini_supported_files:
-            try:
-                # Read file as bytes for direct upload
-                with open(file_path, "rb") as f:
-                    file_data = f.read()
-                
-                mime_type = mime_mapping.get(file_ext, "application/octet-stream")
-                
-                # Validate file size for Gemini (max ~10MB)
-                if len(file_data) > 10 * 1024 * 1024:  # 10MB limit
-                    print(f"⚠️ File too large for direct upload ({len(file_data)} bytes), falling back to text extraction")
-                    if file_ext not in ["png", "jpg", "jpeg", "gif", "webp"]:
-                        content = extract_text_from_file(file_path, file_ext)
-                        if content and not content.startswith("ERROR:"):
-                            if len(content) > 30000:
-                                content = content[:30000] + "..."
-                            parts.append(Part.from_text(f"\nDocument Content:\n{content}"))
-                        else:
-                            return []
-                    else:
-                        return []  # Can't process large image
-                else:
-                    # Add file part directly
-                    file_part = Part.from_data(data=file_data, mime_type=mime_type)
-                    parts.append(file_part)
-                    
-                    print(f"✅ Using direct multimodal upload for {filename} ({mime_type}, {len(file_data)} bytes)")
-                
-            except Exception as e:
-                print(f"⚠️ Direct upload failed for {filename}, falling back to text extraction: {e}")
-                # Fallback to text extraction for non-image files
-                if file_ext not in ["png", "jpg", "jpeg", "gif", "webp"]:
-                    content = extract_text_from_file(file_path, file_ext)
-                    if content and not content.startswith("ERROR:"):
-                        if len(content) > 30000:
-                            content = content[:30000] + "..."
-                        parts.append(Part.from_text(f"\nDocument Content:\n{content}"))
-                    else:
-                        return []
-                else:
-                    return []  # Can't process image if direct upload fails
-        else:
-            # For Excel, Word, and other files - extract text first (Gemini doesn't support these directly)
-            print(f"📄 Extracting text from {filename} (file type: {file_ext})")
-            content = extract_text_from_file(file_path, file_ext)
-            if not content or content.startswith("ERROR:"):
-                print(f"❌ No content extracted from {filename}: {content}")
+        # Use Bedrock Claude for question extraction
+        # Read file as bytes for Bedrock Claude
+        try:
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            # Validate file size (max ~10MB)
+            if len(file_data) > 10 * 1024 * 1024:  # 10MB limit
+                print(f"⚠️ File too large for direct upload ({len(file_data)} bytes)")
                 return []
-            
-            # Limit content length
-            if len(content) > 30000:
-                content = content[:30000] + "..."
-            
-            parts.append(Part.from_text(f"\nDocument Content:\n{content}"))
-        
-        # Generate response
-        print(f"🤖 Sending request to Gemini for {filename}")
-        response = model.generate_content(
-            parts,
-            generation_config={
-                "max_output_tokens": 4096,
-                "temperature": 0.3,
-                "top_p": 0.8,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+
+            print(f"✅ Using Bedrock Claude for question extraction: {filename} ({len(file_data)} bytes)")
+
+        except Exception as e:
+            print(f"⚠️ Failed to read file for AI upload: {filename}: {e}")
+            return []
+
+        # Generate response with Bedrock Claude
+        print(f"🤖 Sending request to Bedrock Claude for {filename}")
+        response = claude.call_claude_with_documents(
+            prompt=prompt,
+            documents=[(file_data, filename)],
+            max_tokens=4096,
+            temperature=0.3,
+            response_format="text"
         )
-        
-        print(f"✅ Received response from Gemini for {filename}")
-        
+
+        print(f"✅ Received response from Bedrock Claude for {filename}")
+
         # Parse the JSON response
-        response_text = response.text.strip()
+        response_text = response.get("text", "").strip()
         print(f"📝 Raw response length: {len(response_text)} characters")
         
         # Clean up the response - remove any markdown formatting
@@ -2980,6 +2646,29 @@ def health_check():
         }
     }), 200
 
+
+@app.route("/api/internal/config", methods=["GET"])
+def get_internal_config():
+    """Internal API for Rapidrfpv2 to get database configuration.
+    This allows Rapidrfpv2 to dynamically get the DATABASE_URL from RapidRFPAI.
+    """
+    # Simple internal key check (Rapidrfpv2 sends this key)
+    internal_key = request.headers.get("X-Internal-Key")
+    expected_key = os.getenv("INTERNAL_API_KEY", "rapidrfp-internal-2024")
+
+    if internal_key != expected_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return jsonify({"error": "DATABASE_URL not configured"}), 500
+
+    return jsonify({
+        "database_url": db_url,
+        "embedding_dimension": 1024,
+        "embedding_table": "noderag_embeddings"
+    }), 200
+
 @app.route("/status", methods=["GET"])
 def service_status():
     """Detailed service status endpoint with file support info"""
@@ -2993,8 +2682,8 @@ def service_status():
         "timestamp": time.time(),
         "services": {
             "firebase": FIREBASE_AVAILABLE,
-            "openai": OPENAI_AVAILABLE,
-            "vertex_ai": VERTEX_AVAILABLE
+            "bedrock_cohere": BEDROCK_AVAILABLE,
+            "vertex_ai": BEDROCK_AVAILABLE
         },
         "active_uploads": active_uploads,
         "version": "3.0.0",
@@ -3010,10 +2699,10 @@ def service_status():
             }
         },
         "capabilities": {
-            "multimodal_analysis": VERTEX_AVAILABLE,
-            "direct_file_upload": VERTEX_AVAILABLE,
-            "image_processing": VERTEX_AVAILABLE,
-            "document_embeddings": OPENAI_AVAILABLE and FIREBASE_AVAILABLE,
+            "multimodal_analysis": BEDROCK_AVAILABLE,
+            "direct_file_upload": BEDROCK_AVAILABLE,
+            "image_processing": BEDROCK_AVAILABLE,
+            "document_embeddings": BEDROCK_AVAILABLE and FIREBASE_AVAILABLE,
             "smart_encoding_detection": True,
             "comprehensive_error_handling": True
         }
@@ -3080,7 +2769,7 @@ def get_supported_file_types():
 #     if request.method == "OPTIONS":
 #         return "", 200
         
-#     if not VERTEX_AVAILABLE:
+#     if not BEDROCK_AVAILABLE:
 #         return jsonify({"error": "AI generation service is not available"}), 503
         
 #     try:
@@ -3419,8 +3108,8 @@ def upload_file():
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
     save_path = None
     try:
@@ -3467,55 +3156,54 @@ def upload_file():
             try:
                 update_upload_progress(upload_id, "Processing", 25, "File saved", filename)
                 
-                # Choose processing method based on USE_LLAMAINDEX flag
-                if USE_LLAMAINDEX:
-                    print(f"🚀 Processing with LlamaIndex (skipping traditional chunking)...")
-                    update_upload_progress(upload_id, "Processing", 50, "Processing with LlamaIndex", filename)
-                    
-                    try:
-                        from llamaindex_integration import process_file_with_llamaindex
-                        
-                        result = process_file_with_llamaindex(
-                            file_path=save_path,
-                            file_id=file_id,
-                            org_id=org_id,
-                            user_id=user_id,
-                            filename=filename
-                        )
-                        
-                        if result.get("success"):
-                            update_upload_progress(upload_id, "completed", 100, "File processed successfully with LlamaIndex", filename)
-                            print(f"✅ LlamaIndex processing complete: {result}")
-                            
-                            # Update backend to mark as having embeddings
-                            update_backend_embedding_status(file_id, org_id, True)
-                            
-                            # LlamaIndex handles everything including storage, so we can return early
-                            print(f"✅ LlamaIndex handled storage to NeonDB directly")
-                            return  # Exit successfully - no need for traditional storage
-                        else:
-                            print(f"❌ LlamaIndex processing failed, falling back to traditional processing")
-                            raise Exception("LlamaIndex processing failed")
-                            
-                    except Exception as e:
-                        print(f"❌ LlamaIndex error: {str(e)}")
-                        print(f"🔄 Falling back to traditional processing...")
-                        # Fall through to traditional processing
-                        
-                        # Extract text and create chunks (for embedding)
-                        update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
-                        chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
-                        
-                        if not chunks:
-                            print(f"❌ No content extracted from {filename}")
-                            update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
-                            # Update backend to mark as NOT having embeddings
-                            update_backend_embedding_status(file_id, org_id, False)
-                            return
-                            
-                        # Generate embeddings
-                        update_upload_progress(upload_id, "Processing", 75, "Generating embeddings", filename)
-                else:
+                # Process with Docling + Direct NeonDB Storage (Bedrock Cohere embeddings)
+                print(f"Processing with Docling + NeonDB...")
+                update_upload_progress(upload_id, "Processing", 50, "Processing with Docling", filename)
+
+                try:
+                    from direct_neondb_storage import process_file_direct_storage
+
+                    result = process_file_direct_storage(
+                        file_path=save_path,
+                        file_id=file_id,
+                        org_id=org_id,
+                        user_id=user_id,
+                        filename=filename
+                    )
+
+                    if result and result.get("success"):
+                        update_upload_progress(upload_id, "completed", 100, "File processed successfully", filename)
+                        print(f"Docling + NeonDB processing complete: {result}")
+
+                        # Update backend to mark as having embeddings
+                        update_backend_embedding_status(file_id, org_id, True)
+
+                        print(f"Stored embeddings to NeonDB directly")
+                        return  # Exit successfully - no need for traditional storage
+                    else:
+                        print(f"Docling + NeonDB processing failed, falling back to traditional processing")
+                        raise Exception("Direct storage processing failed")
+
+                except Exception as e:
+                    print(f"Direct storage error: {str(e)}")
+                    print(f"Falling back to traditional processing...")
+                    # Fall through to traditional processing
+
+                    # Extract text and create chunks (for embedding)
+                    update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
+                    chunks = parse_and_chunk(save_path, file_ext, chunk_size=50, max_chunks=500)
+
+                    if not chunks:
+                        print(f"No content extracted from {filename}")
+                        update_upload_progress(upload_id, "error", 0, "No content extracted", filename)
+                        # Update backend to mark as NOT having embeddings
+                        update_backend_embedding_status(file_id, org_id, False)
+                        return
+
+                    # Generate embeddings
+                    update_upload_progress(upload_id, "Processing", 75, "Generating embeddings", filename)
+
+                if False:  # Traditional processing disabled
                     # Traditional processing
                     # Extract text and create chunks (for embedding)
                     update_upload_progress(upload_id, "Processing", 50, "Extracting text with enhanced processing", filename)
@@ -3726,8 +3414,8 @@ def get_upload_status():
 #     if not FIREBASE_AVAILABLE:
 #         return jsonify({"error": "Firebase is not available"}), 503
         
-#     if not OPENAI_AVAILABLE:
-#         return jsonify({"error": "OpenAI embedding service is not available"}), 503
+#     if not BEDROCK_AVAILABLE:
+#         return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
 #     try:
 #         data = request.get_json(silent=True) or {}
@@ -3994,10 +3682,10 @@ async def bulk_delete_from_neondb(org_id: str, file_ids: list) -> dict:
     """Delete files and their embeddings from NeonDB tables"""
     import asyncpg
     
-    db_url = os.getenv("NEON_DATABASE_URL")
+    db_url = os.getenv("DATABASE_URL")
     if not db_url:
         return {
-            "response": {"error": "NeonDB connection not configured"},
+            "response": {"error": "Database connection not configured"},
             "status_code": 503
         }
     
@@ -4318,10 +4006,10 @@ def chat_with_doc():
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -4535,7 +4223,7 @@ def chat_with_ragie():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -4644,8 +4332,8 @@ def upload_support_document():
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
     save_path = None
     try:
@@ -5148,7 +4836,7 @@ def run_agent_v2():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -5469,7 +5157,7 @@ def run_question_agent():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -5834,7 +5522,7 @@ def run_question_agent_with_upload():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -6083,7 +5771,7 @@ def text_operations():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -6199,38 +5887,15 @@ Provide only the bullet points without any additional explanations or formatting
         if file_type:
             prompt += f"\n\nNote: This text is from a {file_type.upper()} file."
 
-        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.5-flash-lite")
-
-        response = model.generate_content(
-            [Part.from_text(prompt)],
-            generation_config={
-                "max_output_tokens": 2048,
-                "temperature": 0.3,
-                "top_p": 0.8,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+        # Use Bedrock Claude instead of Gemini
+        response = claude.call_claude(
+            prompt=prompt,
+            max_tokens=2048,
+            temperature=0.3,
+            response_format="text"
         )
 
-        processed_text = response.text.strip()
+        processed_text = response.get("text", "").strip()
 
         # Basic validation of the response
         if not processed_text:
@@ -6265,14 +5930,14 @@ def text_operations_v2():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
     try:
         data = request.get_json(silent=True)
@@ -6443,38 +6108,15 @@ Provide only the processed text without any additional explanations or formattin
             context_text = "\n\n".join(context_chunks)
             final_prompt += f"\n\nRelevant context from your knowledge base:\n{context_text[:1000]}...\n\nUse this context to inform your response but focus on processing the text as requested."
 
-        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-        model = GenerativeModel("gemini-2.5-flash-lite")
-
-        response = model.generate_content(
-            [Part.from_text(final_prompt)],
-            generation_config={
-                "max_output_tokens": 2048,
-                "temperature": 0.3,
-                "top_p": 0.8,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+        # Use Bedrock Claude instead of Gemini
+        response = claude.call_claude(
+            prompt=final_prompt,
+            max_tokens=2048,
+            temperature=0.3,
+            response_format="text"
         )
 
-        processed_text = response.text.strip()
+        processed_text = response.get("text", "").strip()
 
         if not processed_text:
             return jsonify({"error": "AI returned empty response"}), 500
@@ -6514,7 +6156,7 @@ def run_proposal_narrative_agent():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -6797,7 +6439,7 @@ def run_proposal_narrative_agent():
 
 def extract_proposal_sections_with_ai(file_path, filename):
     """Extract proposal sections and requirements from RFP document using Vertex AI"""
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         print("❌ Vertex AI not available")
         return []
         
@@ -6857,128 +6499,37 @@ Format your response as a valid JSON array with objects containing "title", "typ
 IMPORTANT: Return ONLY the JSON array, no additional text or formatting.
 """
 
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        
-        # Prepare the content based on file type
-        parts = [Part.from_text(prompt)]
-        
-        # Define MIME type mapping
-        mime_mapping = {
-            "pdf": "application/pdf",
-            "txt": "text/plain", 
-            "csv": "text/csv",
-            "json": "application/json",
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg", 
-            "gif": "image/gif",
-            "webp": "image/webp",
-        }
-        
-        # Files that Gemini can handle directly
-        gemini_supported_files = [
-            # Documents
-            "pdf", "txt", "csv", "md", "markdown", "html", "htm", "xml", "yaml", "yml",
-            
-            # Images  
-            "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "heic", "heif",
-            
-            # Code files (text-based)
-            "py", "js", "ts", "jsx", "tsx", "java", "cpp", "c", "cs", "php", "rb", "go", "rs", 
-            "swift", "kt", "scala", "sql", "sh", "ps1",
-            
-            # Configuration files
-            "log", "cfg", "conf", "ini", "properties", "env", "lock", "gitignore", "dockerfile",
-            
-            # Audio (Gemini 2.0 supports audio)
-            "mp3", "wav", "m4a", "aac", "ogg", "flac",
-            
-            # Video (Gemini 2.0 supports video)
-            "mp4", "mov", "avi", "wmv", "webm", "mkv", "m4v"
-        ]
-        
-        if file_ext in gemini_supported_files:
-            try:
-                # Read file as bytes for direct upload
-                with open(file_path, "rb") as f:
-                    file_data = f.read()
-                
-                mime_type = mime_mapping.get(file_ext, "application/octet-stream")
-                
-                # Validate file size for Gemini (max ~10MB)
-                if len(file_data) > 10 * 1024 * 1024:  # 10MB limit
-                    print(f"⚠️ File too large for direct upload ({len(file_data)} bytes), falling back to text extraction")
-                    content = extract_text_from_file(file_path, file_ext)
-                    if content and not content.startswith("ERROR:"):
-                        if len(content) > 30000:
-                            content = content[:30000] + "..."
-                        parts.append(Part.from_text(f"\nRFP Document Content:\n{content}"))
-                    else:
-                        return []
-                else:
-                    # Add file part directly
-                    file_part = Part.from_data(data=file_data, mime_type=mime_type)
-                    parts.append(file_part)
-                    
-                    print(f"✅ Using direct multimodal upload for {filename} ({mime_type}, {len(file_data)} bytes)")
-                
-            except Exception as e:
-                print(f"⚠️ Direct upload failed for {filename}, falling back to text extraction: {e}")
-                content = extract_text_from_file(file_path, file_ext)
-                if content and not content.startswith("ERROR:"):
-                    if len(content) > 30000:
-                        content = content[:30000] + "..."
-                    parts.append(Part.from_text(f"\nRFP Document Content:\n{content}"))
-                else:
-                    return []
-        else:
-            # For Excel, Word, and other files - extract text first
-            print(f"📄 Extracting text from {filename} (file type: {file_ext})")
-            content = extract_text_from_file(file_path, file_ext)
-            if not content or content.startswith("ERROR:"):
-                print(f"❌ No content extracted from {filename}: {content}")
+        # Use Bedrock Claude for proposal section extraction
+        # Read file as bytes
+        try:
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            # Validate file size (max ~10MB)
+            if len(file_data) > 10 * 1024 * 1024:  # 10MB limit
+                print(f"⚠️ File too large for direct upload ({len(file_data)} bytes)")
                 return []
-            
-            # Limit content length
-            if len(content) > 30000:
-                content = content[:30000] + "..."
-            
-            parts.append(Part.from_text(f"\nRFP Document Content:\n{content}"))
-        
-        # Generate response
-        print(f"🤖 Sending request to Gemini for proposal section extraction: {filename}")
-        response = model.generate_content(
-            parts,
-            generation_config={
-                "max_output_tokens": 4096,
-                "temperature": 0.3,
-                "top_p": 0.8,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+
+            print(f"✅ Using Bedrock Claude for proposal section extraction: {filename} ({len(file_data)} bytes)")
+
+        except Exception as e:
+            print(f"⚠️ Failed to read file for AI upload: {filename}: {e}")
+            return []
+
+        # Generate response with Bedrock Claude
+        print(f"🤖 Sending request to Bedrock Claude for proposal section extraction: {filename}")
+        response = claude.call_claude_with_documents(
+            prompt=prompt,
+            documents=[(file_data, filename)],
+            max_tokens=4096,
+            temperature=0.3,
+            response_format="text"
         )
-        
-        print(f"✅ Received response from Gemini for {filename}")
-        
+
+        print(f"✅ Received response from Bedrock Claude for {filename}")
+
         # Parse the JSON response
-        response_text = response.text.strip()
+        response_text = response.get("text", "").strip()
         print(f"📝 Raw response length: {len(response_text)} characters")
         
         # Clean up the response - remove any markdown formatting
@@ -7089,9 +6640,10 @@ def post_proposal_agent_results_to_backend(rfp_id, agent_results, auth_token):
 # ================================
 
 # ================================
-# LLAMAINDEX INTEGRATION FLAGS
+# DOCUMENT PROCESSING FLAGS (Using Docling + Bedrock Cohere)
 # ================================
-USE_LLAMAINDEX = os.getenv("USE_LLAMAINDEX", "true").lower() == "true"
+# Note: LlamaIndex has been removed. Now using Docling for parsing and Bedrock Cohere for embeddings.
+USE_LLAMAINDEX = True  # Kept for backward compatibility, but LlamaIndex is no longer used
 
 @app.route("/api/v2/upload", methods=["POST", "OPTIONS"])
 def upload_file_v2():
@@ -7107,8 +6659,8 @@ def upload_file_v2():
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
     save_path = None
     try:
@@ -7190,47 +6742,40 @@ def upload_file_v2():
                 # Notify: embedding phase started
                 notify_backend_status(file_id, user_id, 'embedding', False)
                     
-                # Choose processing method based on USE_LLAMAINDEX flag
-                print(f"🔧 USE_LLAMAINDEX flag: {USE_LLAMAINDEX}")
-                if USE_LLAMAINDEX:
-                    print(f"🚀 V2 Processing with LlamaIndex...")
-                    print(f"📄 File: {filename}, Path: {save_path}")
-                    print(f"🆔 IDs - File: {file_id}, Org: {org_id}, User: {user_id}")
-                    try:
-                        print(f"📥 Importing LlamaIndex integration...")
-                        from llamaindex_integration import process_file_with_llamaindex
-                        
-                        print(f"🔄 Calling LlamaIndex processor...")
-                        result = process_file_with_llamaindex(
-                            file_path=save_path,
-                            file_id=file_id,
-                            org_id=org_id,
-                            user_id=user_id,
-                            filename=filename
-                        )
-                        print(f"✅ LlamaIndex result: {result}")
-                        
-                        print(f"✅ V2 LlamaIndex processing complete: {result}")
-                        
-                        if result.get("success"):
-                            # Notify Node.js backend: completed
-                            notify_backend_status(file_id, user_id, 'completed', True)
-                            
-                            # Clean up temporary files
-                            if 'save_path' in locals() and save_path and os.path.exists(save_path):
-                                os.remove(save_path)
-                                print(f"🗑️ V2 Cleaned up temporary file: {save_path}")
-                            
-                            return  # Exit successfully
-                        else:
-                            # Notify failure and fallback to traditional processing
-                            print(f"❌ V2 LlamaIndex failed, falling back to traditional processing")
-                            
-                    except Exception as llamaindex_error:
-                        print(f"❌ V2 LlamaIndex error: {str(llamaindex_error)}")
-                        print(f"🔄 V2 Falling back to traditional processing...")
-                
-                # Traditional processing (fallback or when USE_LLAMAINDEX=false)
+                # Process with Docling + Direct NeonDB Storage (Bedrock Cohere embeddings)
+                print(f"V2 Processing with Docling + NeonDB...")
+                print(f"File: {filename}, Path: {save_path}")
+                print(f"IDs - File: {file_id}, Org: {org_id}, User: {user_id}")
+                try:
+                    from direct_neondb_storage import process_file_direct_storage
+
+                    result = process_file_direct_storage(
+                        file_path=save_path,
+                        file_id=file_id,
+                        org_id=org_id,
+                        user_id=user_id,
+                        filename=filename
+                    )
+
+                    if result and result.get("success"):
+                        print(f"V2 Docling + NeonDB processing complete: {result}")
+                        # Notify Node.js backend: completed
+                        notify_backend_status(file_id, user_id, 'completed', True)
+
+                        # Clean up temporary files
+                        if 'save_path' in locals() and save_path and os.path.exists(save_path):
+                            os.remove(save_path)
+                            print(f"V2 Cleaned up temporary file: {save_path}")
+
+                        return  # Exit successfully
+                    else:
+                        print(f"V2 Docling + NeonDB failed, falling back to traditional processing")
+
+                except Exception as direct_storage_error:
+                    print(f"V2 Direct storage error: {str(direct_storage_error)}")
+                    print(f"V2 Falling back to traditional processing...")
+
+                # Traditional processing (fallback)
                 print(f"🔄 V2 Using traditional processing...")
                 
                 # Generate embeddings
@@ -7727,73 +7272,41 @@ def call_noderag_questionnaire_response(questionnaire_id, question_text, respons
         }
 
 def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename):
-    """Extract chunks using existing v1 processing pipeline"""
+    """Extract chunks using Docling parser + simple text chunker (no LlamaIndex)"""
     try:
-        from direct_neondb_storage import process_file_direct_storage
+        print(f"Extracting chunks using Docling + simple chunker for NodeRAG...")
 
-        print(f"📄 Extracting chunks using v1 pipeline for NodeRAG...")
-
-        # Temporarily modify the direct storage function to return chunks
-        # We'll extract the chunking logic
+        # Extract the chunking logic - use Docling parser
         file_ext = filename.split('.')[-1].lower()
         documents = []
-        page_count = None  # Initialize page count
+        page_count = None
 
-        # Use the same logic as in direct_neondb_storage.py
-        llamaparse_supported = ['pdf', 'docx', 'pptx', 'xlsx', 'html', 'htm']
+        # Use Docling parser for supported formats
+        from docling_parser import parse_document_with_docling, UnsupportedFormatError
+        from text_chunker import chunk_text
 
-        if file_ext in llamaparse_supported:
-            try:
-                from llamaparse_ssl_fix import parse_document_with_metadata
+        try:
+            print(f"Parsing {filename} with Docling...")
+            parse_result = parse_document_with_docling(file_path=file_path)
 
-                print(f"📊 Parsing {filename} with LlamaParse for NodeRAG...")
-                parse_result = parse_document_with_metadata(
-                    file_path=file_path,
-                    api_key=os.getenv("LLAMA_CLOUD_API_KEY"),
-                    result_type="markdown",
-                    verbose=True,
-                    language="en"
-                )
+            documents = parse_result.get("documents", [])
+            page_count = parse_result.get("page_count")
 
-                documents = parse_result.get("documents", [])
-                page_count = parse_result.get("page_count")
+            print(f"Docling loaded {len(documents)} document(s)")
+            if page_count:
+                print(f"Total pages parsed: {page_count}")
 
-                print(f"✅ LlamaParse loaded {len(documents)} document(s)")
-                if page_count:
-                    print(f"📊 Total pages parsed: {page_count}")
+        except UnsupportedFormatError as e:
+            print(f"Unsupported format: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Docling parsing failed: {str(e)}")
+            return None
 
-            except Exception as e:
-                print(f"⚠️ LlamaParse failed: {str(e)}")
-                documents = []
-        
-        # Fallback to LlamaIndex readers if LlamaParse failed
         if not documents:
-            try:
-                from llama_index.readers.file import UnstructuredReader
-                from llama_index.core import Document
+            print(f"No documents extracted from {filename}")
+            return None
 
-                print(f"📖 Trying LlamaIndex UnstructuredReader as fallback...")
-                reader = UnstructuredReader()
-                documents = reader.load_data(file=file_path)
-                print(f"✅ Fallback: Loaded {len(documents)} document(s)")
-
-            except Exception as fallback_error:
-                print(f"⚠️ LlamaIndex fallback also failed: {fallback_error}")
-                # Last resort - try simple text reading for text files only
-                if file_ext not in llamaparse_supported:
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        from llama_index.core import Document
-                        documents = [Document(text=content)]
-                        print(f"✅ Simple text reading succeeded")
-                    except Exception as text_error:
-                        print(f"❌ All extraction methods failed: {text_error}")
-                        return None
-                else:
-                    print(f"❌ Cannot extract content from {file_ext} file - all methods failed")
-                    return None
-        
         # Add metadata to documents
         for doc in documents:
             doc.metadata.update({
@@ -7803,98 +7316,39 @@ def get_chunks_from_v1_processing(file_path, file_id, org_id, user_id, filename)
                 "filename": filename,
                 "file_extension": file_ext
             })
-        
-        # Parse into chunks using LlamaIndex
-        try:
-            from llama_index.core.node_parser import SentenceSplitter
-            
-            chunk_size = int(os.getenv("LLAMAINDEX_CHUNK_SIZE", "1024"))
-            chunk_overlap = int(os.getenv("LLAMAINDEX_CHUNK_OVERLAP", "20"))
-            
-            node_parser = SentenceSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
-            )
-            
-            nodes = node_parser.get_nodes_from_documents(documents)
-            print(f"✂️ Created {len(nodes)} chunks for NodeRAG")
-            
-            # Convert to format expected by NodeRAG API
-            chunks = []
-            for i, node in enumerate(nodes):
-                chunks.append({
-                    'content': node.text,
-                    'text': node.text,  # Alternative key
-                    'metadata': {
-                        **node.metadata,
-                        'chunk_index': i,
-                        'total_chunks': len(nodes)
-                    }
-                })
 
-            return {"chunks": chunks, "page_count": page_count}
+        # Chunk using simple text chunker (no LlamaIndex)
+        all_text = " ".join([doc.text for doc in documents])
+        text_chunks = chunk_text(all_text)
+        print(f"Created {len(text_chunks)} chunks for NodeRAG")
 
-        except Exception as e:
-            print(f"⚠️ Chunking failed: {str(e)}")
-            # Simple fallback chunking
-            all_text = " ".join([doc.text for doc in documents])
-            chunk_size = 1024
-            chunks = []
-            
-            words = all_text.split()
-            current_chunk = []
-            current_length = 0
-            
-            for word in words:
-                current_chunk.append(word)
-                current_length += len(word) + 1
-                
-                if current_length >= chunk_size:
-                    chunk_text = " ".join(current_chunk)
-                    chunks.append({
-                        'content': chunk_text,
-                        'text': chunk_text,
-                        'metadata': {
-                            'file_id': file_id,
-                            'org_id': org_id,
-                            'user_id': user_id,
-                            'filename': filename,
-                            'chunk_index': len(chunks)
-                        }
-                    })
-                    current_chunk = []
-                    current_length = 0
-            
-            # Add remaining chunk
-            if current_chunk:
-                chunk_text = " ".join(current_chunk)
-                chunks.append({
-                    'content': chunk_text,
-                    'text': chunk_text,
-                    'metadata': {
-                        'file_id': file_id,
-                        'org_id': org_id,
-                        'user_id': user_id,
-                        'filename': filename,
-                        'chunk_index': len(chunks)
-                    }
-                })
+        # Convert to format expected by NodeRAG API
+        chunks = []
+        for i, chunk_content in enumerate(text_chunks):
+            chunks.append({
+                'content': chunk_content,
+                'text': chunk_content,
+                'metadata': {
+                    'file_id': file_id,
+                    'org_id': org_id,
+                    'user_id': user_id,
+                    'filename': filename,
+                    'chunk_index': i,
+                    'total_chunks': len(text_chunks)
+                }
+            })
 
-            print(f"✂️ Created {len(chunks)} chunks (fallback method)")
-            return {"chunks": chunks, "page_count": page_count}
+        return {"chunks": chunks, "page_count": page_count}
 
     except Exception as e:
-        print(f"❌ Chunk extraction error: {e}")
+        print(f"Chunk extraction error: {e}")
         return None
 
 @app.route("/api/v3/upload", methods=["POST", "OPTIONS"])
 def upload_file_v3():
-    """V3 Upload endpoint - Direct LlamaIndex processing with custom HF embeddings and GCS support"""
+    """V3 Upload endpoint - Docling parsing + Bedrock Cohere embeddings + NeonDB storage"""
     if request.method == "OPTIONS":
         return "", 200
-    
-    if not USE_LLAMAINDEX:
-        return jsonify({"error": "V3 upload requires LlamaIndex (USE_LLAMAINDEX=true)"}), 503
         
     save_path = None
     try:
@@ -8090,7 +7544,7 @@ def upload_file_v3():
                 "status": "processing",
                 "rag_version": "v2",
                 "processing_method": "noderag_v2_api",
-                "embedding_model": "openai_embeddings",
+                "embedding_model": "cohere_embeddings",
                 "vector_dimension": "1536",
                 "note": "Using NodeRAG graph-based processing with semantic understanding"
             }), 202
@@ -8181,10 +7635,18 @@ def noderag_webhook():
             )
             
         elif status == "completed":
-            results = webhook_data.get("results", {})
-            chunks_processed = results.get("chunks_processed", 0)
-            embeddings_stored = results.get("embeddings_stored", 0)
-            page_count = results.get("page_count")  # Extract page_count if provided by NodeRAG
+            # New format: data contains embeddings directly from stateless Rapidrfpv2
+            chunks_processed = webhook_data.get("chunks_processed", 0)
+            page_count = webhook_data.get("page_count")
+            session_id = webhook_data.get("session_id")  # org_id
+            processing_time = webhook_data.get("processing_time", 0)
+
+            # Extract embeddings from callback (stateless mode)
+            embeddings = webhook_data.get("embeddings", [])
+            embeddings_count = webhook_data.get("embeddings_count", len(embeddings))
+            graph_stats = webhook_data.get("graph_stats", {})
+            graph_data = webhook_data.get("graph_data")  # Base64 encoded pickle (optional)
+
             auth_token = None
 
             # Retrieve cached metadata if page_count not in webhook
@@ -8206,15 +7668,120 @@ def noderag_webhook():
                         # Clean up cache entry
                         del noderag_metadata_cache[file_id]
 
-            notify_backend_status(
-                file_id, user_id, 'completed', True,
-                f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings",
-                source="noderag_v2",
-                page_count=page_count,
-                chunks_stored=embeddings_stored,
-                auth_token=auth_token
-            )
-            print(f"✅ NodeRAG processing completed for file_id={file_id}")
+            # Store embeddings in background thread (non-blocking)
+            def store_embeddings_background():
+                """Background task to store embeddings in AWS RDS"""
+                embeddings_stored = 0
+                if not embeddings:
+                    print(f"⚠️ No embeddings to store for file_id={file_id}")
+                    notify_backend_status(
+                        file_id, user_id, 'completed', True,
+                        f"NodeRAG: {chunks_processed} chunks, 0 embeddings",
+                        source="noderag_v2",
+                        page_count=page_count,
+                        chunks_stored=0,
+                        auth_token=auth_token
+                    )
+                    return
+
+                print(f"📦 Storing {len(embeddings)} NodeRAG embeddings from callback...")
+                try:
+                    import asyncio
+                    import asyncpg
+                    import json as json_module
+
+                    async def store_noderag_embeddings_async():
+                        db_url = os.getenv("DATABASE_URL")
+                        if not db_url:
+                            print("❌ DATABASE_URL not found - cannot store NodeRAG embeddings")
+                            return 0
+
+                        conn = await asyncpg.connect(db_url)
+                        stored = 0
+                        try:
+                            # Create table if not exists
+                            await conn.execute("""
+                                CREATE TABLE IF NOT EXISTS noderag_embeddings (
+                                    id SERIAL PRIMARY KEY,
+                                    node_id TEXT UNIQUE NOT NULL,
+                                    node_type TEXT NOT NULL,
+                                    content TEXT NOT NULL,
+                                    embedding vector(1024),
+                                    file_id TEXT NOT NULL,
+                                    org_id TEXT NOT NULL,
+                                    user_id TEXT,
+                                    chunk_index INTEGER,
+                                    graph_metadata JSONB,
+                                    created_at TIMESTAMP DEFAULT NOW(),
+                                    updated_at TIMESTAMP DEFAULT NOW()
+                                )
+                            """)
+
+                            for emb in embeddings:
+                                node_id = emb.get("node_id")
+                                node_type = emb.get("node_type", "unknown")
+                                content = emb.get("content", "")
+                                embedding = emb.get("embedding", [])
+                                metadata = emb.get("metadata", {})
+                                chunk_index_raw = emb.get("chunk_index", 0)
+                                # Handle chunk_index being a list (e.g., [0, 0]) or integer
+                                if isinstance(chunk_index_raw, list):
+                                    chunk_index = chunk_index_raw[0] if chunk_index_raw else 0
+                                else:
+                                    chunk_index = chunk_index_raw if isinstance(chunk_index_raw, int) else 0
+
+                                if not embedding or not node_id:
+                                    continue
+
+                                # Convert embedding list to pgvector format
+                                embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+
+                                # Upsert embedding
+                                await conn.execute("""
+                                    INSERT INTO noderag_embeddings (
+                                        node_id, node_type, content, embedding, file_id, org_id, user_id, chunk_index, graph_metadata, created_at
+                                    ) VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9::jsonb, NOW())
+                                    ON CONFLICT (node_id) DO UPDATE SET
+                                        content = EXCLUDED.content,
+                                        embedding = EXCLUDED.embedding,
+                                        graph_metadata = EXCLUDED.graph_metadata,
+                                        created_at = NOW()
+                                """, node_id, node_type, content, embedding_str, file_id, session_id or "default", user_id, chunk_index, json_module.dumps(metadata))
+
+                                stored += 1
+                                if stored % 50 == 0:
+                                    print(f"  Stored {stored}/{len(embeddings)} NodeRAG embeddings...")
+
+                            print(f"✅ Stored {stored} NodeRAG embeddings in AWS RDS")
+                            return stored
+                        finally:
+                            await conn.close()
+
+                    # Run async storage (simple approach for background thread)
+                    embeddings_stored = asyncio.run(store_noderag_embeddings_async())
+
+                except Exception as storage_error:
+                    print(f"❌ Failed to store NodeRAG embeddings: {storage_error}")
+                    import traceback
+                    traceback.print_exc()
+                    embeddings_stored = 0
+
+                # Notify backend after storage completes
+                notify_backend_status(
+                    file_id, user_id, 'completed', True,
+                    f"NodeRAG: {chunks_processed} chunks, {embeddings_stored} embeddings stored",
+                    source="noderag_v2",
+                    page_count=page_count,
+                    chunks_stored=embeddings_stored,
+                    auth_token=auth_token
+                )
+                print(f"✅ NodeRAG processing completed for file_id={file_id}, stored {embeddings_stored} embeddings in {processing_time}s")
+
+            # Start background thread for storage (non-blocking webhook response)
+            import threading
+            storage_thread = threading.Thread(target=store_embeddings_background, daemon=True)
+            storage_thread.start()
+            print(f"🚀 Background storage started for {len(embeddings)} embeddings")
             
         elif status == "failed":
             error_msg = webhook_data.get("error", "Unknown NodeRAG error")
@@ -8487,98 +8054,116 @@ def search_v3_unified():
 
 @app.route("/api/v2/search", methods=["POST", "OPTIONS"])
 def search_v2():
-    """V2 Search endpoint with LlamaIndex integration"""
+    """V2 Search endpoint using NeonDB vector search with Bedrock Cohere"""
     if request.method == "OPTIONS":
         return "", 200
-    
+
     try:
         data = request.get_json()
         query = data.get("query")
         org_id = data.get("orgId")
         top_k = data.get("top_k", 10)
         file_ids = data.get("fileIds")  # Optional
-        
+
         if not query or not org_id:
             return jsonify({"error": "Missing required fields: query, orgId"}), 400
-        
-        if USE_LLAMAINDEX:
-            print(f"🔍 V2 LlamaIndex Search: '{query}' in org: {org_id}")
-            try:
-                from llamaindex_integration import search_with_llamaindex
-                
-                results = search_with_llamaindex(
-                    query=query,
-                    org_id=org_id,
-                    top_k=top_k,
-                    file_ids=file_ids
-                )
-                
-                return jsonify({
-                    "query": query,
-                    "results": results,
-                    "total_found": len(results),
-                    "search_type": "llamaindex_vector_search",
-                    "storage": "neondb_postgresql"
-                }), 200
-                
-            except Exception as llamaindex_error:
-                print(f"❌ V2 LlamaIndex search error: {str(llamaindex_error)}")
-                # Could fallback to traditional search here if implemented
-                return jsonify({"error": f"LlamaIndex search failed: {str(llamaindex_error)}"}), 500
-        else:
-            # Traditional search would go here
-            return jsonify({"error": "Traditional search not implemented. Enable LlamaIndex."}), 501
-        
+
+        print(f"V2 Search: '{query}' in org: {org_id}")
+        try:
+            from retrieval_system import search_documents
+
+            results = search_documents(
+                query=query,
+                org_id=org_id,
+                file_ids=file_ids,
+                top_k=top_k
+            )
+
+            return jsonify({
+                "query": query,
+                "results": results,
+                "total_found": len(results),
+                "search_type": "neondb_vector_search",
+                "storage": "neondb_postgresql"
+            }), 200
+
+        except Exception as search_error:
+            print(f"V2 search error: {str(search_error)}")
+            return jsonify({"error": f"Search failed: {str(search_error)}"}), 500
+
     except Exception as e:
-        print(f"❌ V2 Search error: {str(e)}")
+        print(f"V2 Search error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/v2/answer", methods=["POST", "OPTIONS"])
 def generate_answer_v2():
-    """V2 Answer generation endpoint with LlamaIndex + Qwen2"""
+    """V2 Answer generation endpoint using NeonDB retrieval + Bedrock Claude"""
     if request.method == "OPTIONS":
         return "", 200
-    
+
     try:
         data = request.get_json()
         query = data.get("query")
         org_id = data.get("orgId")
         file_ids = data.get("fileIds")  # Optional
-        
+
         if not query or not org_id:
             return jsonify({"error": "Missing required fields: query, orgId"}), 400
-        
-        if USE_LLAMAINDEX:
-            print(f"🤖 V2 LlamaIndex Answer Generation: '{query}' in org: {org_id}")
-            try:
-                from llamaindex_integration import get_llamaindex_processor
-                
-                processor = get_llamaindex_processor()
-                result = processor.generate_answer(
-                    query=query,
-                    org_id=org_id,
-                    file_ids=file_ids
-                )
-                
+
+        print(f"V2 Answer Generation: '{query}' in org: {org_id}")
+        try:
+            from retrieval_system import get_context
+            from bedrock_client import claude, BEDROCK_AVAILABLE
+
+            if not BEDROCK_AVAILABLE:
+                return jsonify({"error": "Bedrock Claude not available"}), 503
+
+            # Get context from retrieval system
+            context_result = get_context(
+                query=query,
+                org_id=org_id,
+                file_ids=file_ids,
+                max_context_length=4000
+            )
+
+            if not context_result.get("context"):
                 return jsonify({
                     "query": query,
-                    "answer": result["answer"],
-                    "sources": result["sources"],
-                    "confidence": result["confidence"],
-                    "total_sources_found": result["total_sources_found"],
-                    "model": "qwen2.5-7b-instruct",
-                    "method": "llamaindex_rag",
-                    "storage": "neondb_postgresql"
+                    "answer": "I couldn't find relevant information to answer your question.",
+                    "sources": [],
+                    "confidence": "low",
+                    "total_sources_found": 0
                 }), 200
-                
-            except Exception as llamaindex_error:
-                print(f"❌ V2 LlamaIndex answer error: {str(llamaindex_error)}")
-                return jsonify({"error": f"LlamaIndex answer generation failed: {str(llamaindex_error)}"}), 500
-        else:
-            return jsonify({"error": "Answer generation requires LlamaIndex. Enable USE_LLAMAINDEX."}), 501
-        
+
+            # Generate answer using Bedrock Claude
+            prompt = f"""Based on the following context, please answer the question accurately and concisely.
+
+Context:
+{context_result['context']}
+
+Question: {query}
+
+Answer:"""
+
+            answer = claude.generate(prompt, max_tokens=2048, temperature=0.7)
+
+            return jsonify({
+                "query": query,
+                "answer": answer,
+                "sources": context_result.get("chunks_metadata", []),
+                "confidence": "high" if context_result.get("total_chunks", 0) >= 3 else "medium",
+                "total_sources_found": context_result.get("total_chunks", 0),
+                "model": "bedrock-claude-sonnet-4",
+                "method": "neondb_rag",
+                "storage": "neondb_postgresql"
+            }), 200
+
+        except Exception as answer_error:
+            print(f"V2 answer error: {str(answer_error)}")
+            return jsonify({"error": f"Answer generation failed: {str(answer_error)}"}), 500
+
     except Exception as e:
-        print(f"❌ V2 Answer error: {str(e)}")
+        print(f"V2 Answer error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 def notify_backend_status(file_id, user_id, status, embedding_complete, error=None, source="flask_ai", page_count=None, chunks_stored=None, auth_token=None):
@@ -8947,12 +8532,11 @@ def get_file_status_v2():
 
 @app.route("/process-project-support-embedding", methods=["POST", "OPTIONS"])
 def process_project_support_embedding():
-    """Process embeddings for project support documents using V3 approach (LlamaParse + HF + NeonDB)"""
+    """Process embeddings for project support documents using V3 approach (Docling + HF + NeonDB)"""
     if request.method == "OPTIONS":
         return "", 200
         
-    if not USE_LLAMAINDEX:
-        return jsonify({"error": "Project support processing requires LlamaIndex (USE_LLAMAINDEX=true)"}), 503
+    # Project support processing uses Docling + direct NeonDB storage
         
     save_path = None
     try:
@@ -8989,8 +8573,8 @@ def process_project_support_embedding():
                 if user_id:
                     notify_backend_status(file_id, user_id, "extracting", False)
                 
-                # Use V3 approach: LlamaParse + HF embeddings + NeonDB storage
-                print(f"🚀 V3 Project Support: Starting LlamaParse processing...")
+                # Use V3 approach: Docling + HF embeddings + NeonDB storage
+                print(f"🚀 V3 Project Support: Starting Docling processing...")
                 from direct_neondb_storage import process_file_direct_storage_project_support
                 
                 result = process_file_direct_storage_project_support(
@@ -9205,10 +8789,10 @@ def generate_response_v2_old():
     if not FIREBASE_AVAILABLE:
         return jsonify({"error": "Firebase is not available"}), 503
         
-    if not OPENAI_AVAILABLE:
-        return jsonify({"error": "OpenAI embedding service is not available"}), 503
+    if not BEDROCK_AVAILABLE:
+        return jsonify({"error": "Bedrock Cohere embedding service is not available"}), 503
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "AI generation service is not available"}), 503
         
     try:
@@ -9841,7 +9425,7 @@ def analyze_structured_document():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "Vertex AI service is not available"}), 503
     
     try:
@@ -10087,7 +9671,7 @@ def process_structured_document():
     if request.method == "OPTIONS":
         return "", 200
         
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "Vertex AI service is not available"}), 503
     
     try:
@@ -10354,31 +9938,30 @@ def classify_question_type(content):
 
 def analyze_document_with_direct_ai(filepath, filename, target_cells):
     """
-    Upload document directly to Vertex AI and get comprehensive analysis
+    Upload document directly to Bedrock Claude and get comprehensive analysis
     using embeddings and AI understanding
     """
     try:
-        from vertexai.generative_models import GenerativeModel, Part, SafetySetting
         import pandas as pd
-        
-        print(f"🤖 Processing {filename} for Vertex AI analysis...")
-        
+
+        print(f"🤖 Processing {filename} for Bedrock Claude analysis...")
+
         # Determine file extension
         file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
-        
-        # For XLSX/XLS files, convert to text format since Vertex AI doesn't support these MIME types
+
+        # For XLSX/XLS files, convert to text format
         if file_ext in ['xlsx', 'xls']:
             print(f"📊 Converting {file_ext.upper()} to text format for AI analysis...")
-            
+
             # Read Excel file and convert all sheets to text
             excel_file = pd.ExcelFile(filepath)
             text_content = f"EXCEL FILE: {filename}\n{'='*50}\n\n"
-            
+
             for sheet_name in excel_file.sheet_names:
                 df = pd.read_excel(filepath, sheet_name=sheet_name)
                 text_content += f"SHEET: {sheet_name}\n{'-'*30}\n"
                 text_content += f"Columns: {', '.join(df.columns.tolist())}\n\n"
-                
+
                 # Convert DataFrame to readable text format
                 for idx, row in df.iterrows():
                     row_text = []
@@ -10387,29 +9970,18 @@ def analyze_document_with_direct_ai(filepath, filename, target_cells):
                             row_text.append(f"{col_name}: {value}")
                     if row_text:
                         text_content += f"Row {idx + 1}: {' | '.join(row_text)}\n"
-                
+
                 text_content += "\n\n"
-            
-            # Create text part for AI analysis
-            file_part = Part.from_text(text_content)
-            
-        elif file_ext == 'csv':
-            # For CSV files, we can upload directly
-            with open(filepath, "rb") as f:
-                file_data = f.read()
-            file_part = Part.from_data(data=file_data, mime_type='text/csv')
-            
+
+            # Store text content for Bedrock Claude
+            file_data = text_content.encode('utf-8')
+            effective_filename = f"{filename}.txt"  # Treat as text file
+
         else:
-            # For other file types, try direct upload
+            # For other file types, read as bytes
             with open(filepath, "rb") as f:
                 file_data = f.read()
-            mime_type_map = {
-                'txt': 'text/plain',
-                'pdf': 'application/pdf',
-                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            }
-            mime_type = mime_type_map.get(file_ext, 'application/octet-stream')
-            file_part = Part.from_data(data=file_data, mime_type=mime_type)
+            effective_filename = filename
         
         # Create comprehensive analysis prompt
         analysis_prompt = f"""
@@ -10440,45 +10012,23 @@ Please provide:
 Focus on extracting factual information that could be used to answer questions or fill in requirements found in forms or questionnaires.
 """
         
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        
-        # Generate comprehensive document analysis
-        response = model.generate_content(
-            [file_part, Part.from_text(analysis_prompt)],
-            generation_config={
-                "max_output_tokens": 8192,
-                "temperature": 0.3,  # Lower temperature for more factual analysis
-                "top_p": 0.95,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+        # Generate comprehensive document analysis using Bedrock Claude
+        response = claude.call_claude_with_documents(
+            prompt=analysis_prompt,
+            documents=[(file_data, effective_filename)],
+            max_tokens=8192,
+            temperature=0.3,  # Lower temperature for more factual analysis
+            response_format="text"
         )
-        
-        document_analysis = response.text.strip()
+
+        document_analysis = response.get("text", "").strip()
         print(f"✅ Document analysis completed: {len(document_analysis)} characters")
         
         return {
             "filename": filename,
             "analysis": document_analysis,
             "target_cells_context": len(target_cells),
-            "processing_method": "direct_vertex_ai_upload"
+            "processing_method": "direct_bedrock_claude_upload"
         }
         
     except Exception as e:
@@ -10498,14 +10048,12 @@ def generate_responses_for_target_cells(target_cells, document_context, df, shee
     
     for cell in target_cells:
         try:
-            from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-            
             # Create specific query for this cell
             question_content = cell["question_content"]
             column_header = cell["target_column_name"]
             row_context = cell["context"]["row_context"]
             question_type = cell["context"]["question_type"]
-            
+
             # Build contextual prompt
             prompt = f"""
 Based on the document analysis provided below, please answer the specific question.
@@ -10521,44 +10069,22 @@ SPECIFIC QUESTION DETAILS:
 - Sheet: {sheet_name}
 
 INSTRUCTION:
-Please provide a specific, concise answer to fill in the empty cell in the "{column_header}" column for this question. 
+Please provide a specific, concise answer to fill in the empty cell in the "{column_header}" column for this question.
 Base your answer ONLY on the information available in the document analysis above.
 If the document doesn't contain relevant information, respond with "Information not available in document".
 
 Answer:
 """
-            
-            model = GenerativeModel("gemini-2.5-flash-lite")
-            
-            response = model.generate_content(
-                [Part.from_text(prompt)],
-                generation_config={
-                    "max_output_tokens": 1000,  # Shorter responses for cell content
-                    "temperature": 0.3,
-                    "top_p": 0.9,
-                },
-                safety_settings=[
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                        threshold=SafetySetting.HarmBlockThreshold.OFF
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                        threshold=SafetySetting.HarmBlockThreshold.OFF
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                        threshold=SafetySetting.HarmBlockThreshold.OFF
-                    ),
-                    SafetySetting(
-                        category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                        threshold=SafetySetting.HarmBlockThreshold.OFF
-                    ),
-                ],
-                stream=False
+
+            # Use Bedrock Claude for response generation
+            response = claude.call_claude(
+                prompt=prompt,
+                max_tokens=1000,  # Shorter responses for cell content
+                temperature=0.3,
+                response_format="text"
             )
-            
-            ai_answer = response.text.strip()
+
+            ai_answer = response.get("text", "").strip()
             
             filled_responses.append({
                 "sheet_name": sheet_name,
@@ -10644,7 +10170,7 @@ def prototype_sheet_analyzer():
     if request.method == "OPTIONS":
         return "", 200
     
-    if not VERTEX_AVAILABLE:
+    if not BEDROCK_AVAILABLE:
         return jsonify({"error": "Vertex AI service is not available"}), 503
     
     try:
@@ -10751,15 +10277,14 @@ def analyze_excel_for_prototype(filepath, filename):
 
 def analyze_sheet_for_questions(df, sheet_name, filepath, filename):
     """Analyze a single sheet/dataframe to identify questions and answer types"""
-    from vertexai.generative_models import GenerativeModel, Part, SafetySetting
-    
+
     try:
         # Convert dataframe to text representation for LLM analysis
         sheet_text = f"Sheet Name: {sheet_name}\n\n"
         sheet_text += f"Headers: {list(df.columns)}\n\n"
         sheet_text += "Sample Data (first 10 rows):\n"
         sheet_text += df.head(10).to_string(index=True)
-        
+
         # Create analysis prompt
         analysis_prompt = f"""
 Analyze this spreadsheet sheet and determine:
@@ -10811,39 +10336,16 @@ Please respond in JSON format:
 }}
 """
 
-        # Use Vertex AI to analyze
-        model = GenerativeModel("gemini-2.5-flash-lite")
-        
-        response = model.generate_content(
-            [Part.from_text(analysis_prompt)],
-            generation_config={
-                "temperature": 0.1,
-                "top_p": 0.8,
-                "max_output_tokens": 2048,
-            },
-            safety_settings=[
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-                SafetySetting(
-                    category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=SafetySetting.HarmBlockThreshold.OFF
-                ),
-            ],
-            stream=False
+        # Use Bedrock Claude to analyze
+        response = claude.call_claude(
+            prompt=analysis_prompt,
+            max_tokens=2048,
+            temperature=0.1,
+            response_format="text"
         )
-        
+
         # Parse AI response
-        ai_analysis = response.text.strip()
+        ai_analysis = response.get("text", "").strip()
         
         # Try to extract JSON from AI response
         try:

@@ -1,5 +1,8 @@
 __pycache__
 /venv
 .env
+.env.*
+.env.development
+.env.production
 fire.json
 .DS_Store
