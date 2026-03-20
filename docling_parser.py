@@ -112,7 +112,7 @@ def parse_with_docling(pdf_path: str, original_filename: str) -> Dict[str, Any]:
             f"{DOCLING_URL}/v1/convert/file",
             files=files,
             data=data,
-            timeout=300.0
+            timeout=None  # No timeout - processing can take long for large documents
         )
         response.raise_for_status()
 
