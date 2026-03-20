@@ -6992,13 +6992,17 @@ def call_noderag_service(org_id, file_id, user_id, chunks, page_count=None):
         main_server_url = os.getenv("MAIN_SERVER_URL", "http://localhost:5000")
         callback_url = f"{main_server_url}/api/webhook/noderag"
 
+        # Get environment for routing (dev or prod)
+        environment = os.getenv("ENVIRONMENT", "prod")
+
         # Prepare API payload
         payload = {
             "org_id": org_id,
             "file_id": file_id,
             "user_id": user_id,
             "chunks": chunks,
-            "callback_url": callback_url
+            "callback_url": callback_url,
+            "environment": environment
         }
 
         # Add page_count if available
@@ -7054,19 +7058,23 @@ def call_noderag_delete_service(org_id, file_ids):
     """Send delete request to NodeRAG service for bulk deletion via API"""
     try:
         print(f"🗑️ Sending delete request to NodeRAG service for {len(file_ids)} files in org: {org_id}")
-        
+
         # Get NodeRAG service URL from environment
         noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
-        
+
         # Prepare callback URL for status updates
         main_server_url = os.getenv("MAIN_SERVER_URL", "http://localhost:5000")
         callback_url = f"{main_server_url}/api/webhook/noderag-delete"
-        
+
+        # Get environment for routing (dev or prod)
+        environment = os.getenv("ENVIRONMENT", "prod")
+
         # Prepare API payload
         payload = {
             "org_id": org_id,
             "file_ids": file_ids,
-            "callback_url": callback_url
+            "callback_url": callback_url,
+            "environment": environment
         }
         
         # Make API call to NodeRAG service
@@ -7132,10 +7140,13 @@ def call_noderag_generate_response(query, org_id, project_id=None, knowledge_bas
     """Send generate response request to NodeRAG service via API"""
     try:
         print(f"🤖 Sending generate response request to NodeRAG service for org: {org_id}")
-        
+
         # Get NodeRAG service URL from environment
         noderag_url = os.getenv("NODERAG_SERVICE_URL", "http://localhost:5001")
-        
+
+        # Get environment for routing (dev or prod)
+        environment = os.getenv("ENVIRONMENT", "prod")
+
         # Prepare API payload
         payload = {
             "query": query,
@@ -7143,7 +7154,8 @@ def call_noderag_generate_response(query, org_id, project_id=None, knowledge_bas
             "project_id": project_id,
             "knowledge_base_option": knowledge_base_option,
             "conversation_history": conversation_history,
-            "max_results": max_results
+            "max_results": max_results,
+            "environment": environment
         }
         
         # Make API call to NodeRAG service
