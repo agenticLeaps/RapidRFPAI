@@ -12,7 +12,7 @@ import pandas as pd
 from typing import Dict, Any, List
 from text_chunker import SimpleDocument as Document
 
-DOCLING_URL = os.getenv("DOCLING_SERVICE_URL", "http://parsing.rapidrfp.ai:5001")
+DOCLING_URL = os.getenv("DOCLING_SERVICE_URL", "https://parsing.rapidrfp.ai")
 
 # Strict format allowlist
 ALLOWED_FORMATS = {'.pdf', '.docx', '.doc', '.pptx', '.ppt', '.txt', '.xlsx', '.xls', '.csv'}
