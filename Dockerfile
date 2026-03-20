@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1
 ENV FLASK_ENV=production
 ENV PORT=8080
 
-# Install system dependencies including Redis CLI for health checks
+# Install system dependencies including Redis CLI for health checks and LibreOffice for document conversion
 RUN apt-get update && apt-get install -y \
     gcc \
     libffi-dev \
@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     curl \
     redis-tools \
+    libreoffice \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install dependencies
